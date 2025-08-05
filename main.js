@@ -24,7 +24,7 @@ async function main() {
     let useLighterBlend = true;
 
     // Camera controls
-    let zoom = 0.5; // slightly zoomed out
+    let zoom = 0.8; // slightly zoomed out
     let rotX = Math.PI; // tilt for better perspective
     let rotY = Math.PI; // rotate around Y axis for better view
     let dragging = false;
@@ -33,19 +33,19 @@ async function main() {
 
     const params = {
         numParticles: 20000,
-        particleSize: 0.025,
+        particleSize: 0.02,
         G: 0.00001, 
-        dt: 0.0001,
+        dt: 0.0003,
     };    
 
     // [particleSize, zoom, rotX, rotY, near, far, cameraZ]
-    const near = 0.01;
-    const far = 100.0;
+    const near = 0.1;
+    const far = 10.0;
     const cameraZ = 2.0;
 
     canvas.addEventListener('wheel', (e) => {
         e.preventDefault();
-        zoom *= Math.exp(-e.deltaY * 0.001);
+        zoom *= Math.exp(-e.deltaY * 0.001); // normal zoom direction
         zoom = Math.max(0.1, Math.min(zoom, 10.0));
     });
 
@@ -59,9 +59,8 @@ async function main() {
         if (dragging && e.buttons === 1) {
             const dx = e.clientX - lastMouseX;
             const dy = e.clientY - lastMouseY;
-            rotX += dx * 0.005; // left/right drag rotates X
-            rotY += dy * 0.005; // up/down drag rotates Y
-            rotX = Math.max(-Math.PI/2, Math.min(Math.PI/2, rotX));
+            rotY -= dx * 0.005; // reversed horizontal drag rotates Y
+            rotX -= dy * 0.005; // reversed vertical drag rotates X
             lastMouseX = e.clientX;
             lastMouseY = e.clientY;
         }
@@ -99,23 +98,29 @@ async function main() {
 
     // Initialize particles in a disk, each with random mass
     for (let i = 0; i < params.numParticles; i++) {
-        const r = Math.random() * 0.9;
-        const theta = Math.random() * 2 * Math.PI;
-        const z = (Math.random() - 0.5) * 1.0;
+        // Random position in a ball (uniformly distributed in a sphere)
+        let u = Math.random();
+        let v = Math.random();
+        let w = Math.random();
+        let theta = 2 * Math.PI * u;
+        let phi = Math.acos(2 * v - 1);
+        let r = Math.cbrt(w) * 0.9; // radius, cube root for uniform sphere
+        let x = r * Math.sin(phi) * Math.cos(theta);
+        let y = r * Math.sin(phi) * Math.sin(theta);
+        let z = r * Math.cos(phi);
 
         // Assign random mass between 0.5 and 5.0
         const mass = 0.5 + Math.random() * 99.5;
 
         // Position
-        particleAndVelocityData[i * 8 + 0] = r * Math.cos(theta);
-        particleAndVelocityData[i * 8 + 1] = r * Math.sin(theta);
+        particleAndVelocityData[i * 8 + 0] = x;
+        particleAndVelocityData[i * 8 + 1] = y;
         particleAndVelocityData[i * 8 + 2] = z;
         particleAndVelocityData[i * 8 + 3] = mass;
 
-        // Initial velocity for orbit (adjusted for mass)
-        const speed = Math.sqrt(0.1 / (r + 0.1));
-        particleAndVelocityData[i * 8 + 4] = -speed * Math.sin(theta);
-        particleAndVelocityData[i * 8 + 5] = speed * Math.cos(theta);
+        // Initial velocity: zero (no preferred orbit direction in a ball)
+        particleAndVelocityData[i * 8 + 4] = 0;
+        particleAndVelocityData[i * 8 + 5] = 0;
         particleAndVelocityData[i * 8 + 6] = 0;
         particleAndVelocityData[i * 8 + 7] = 0; // unused
     }
@@ -142,9 +147,9 @@ async function main() {
     });
     device.queue.writeBuffer(simParamsBuffer, 0, simParamsData);
 
-    const renderParamsData = new Float32Array([params.particleSize, zoom, rotX, rotY, near, far, cameraZ]);
+    const renderParamsData = new Float32Array([params.particleSize, zoom, rotX, rotY, near, far, cameraZ, 0.0]);
     const renderParamsBuffer = device.createBuffer({
-        size: renderParamsData.byteLength,
+        size: 8 * 4, // 8 floats (32 bytes)
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     device.queue.writeBuffer(renderParamsBuffer, 0, renderParamsData);
@@ -203,7 +208,19 @@ async function main() {
                 @location(0) uv: vec2<f32>,
             };
 
-            @group(0) @binding(0) var<uniform> render_params: vec4<f32>; // [size, zoom, rotX, rotY]
+            // [size, zoom, rotX, rotY, near, far, cameraZ]
+            struct RenderParams {
+                params0: vec4<f32>, // [size, zoom, rotX, rotY]
+                params1: vec4<f32>, // [near, far, cameraZ, unused]
+            }
+            @group(0) @binding(0) var<uniform> render_params: RenderParams;
+            fn get_size() -> f32 { return render_params.params0.x; }
+            fn get_zoom() -> f32 { return render_params.params0.y; }
+            fn get_rotX() -> f32 { return render_params.params0.z; }
+            fn get_rotY() -> f32 { return render_params.params0.w; }
+            fn get_near() -> f32 { return render_params.params1.x; }
+            fn get_far() -> f32 { return render_params.params1.y; }
+            fn get_cameraZ() -> f32 { return render_params.params1.z; }
 
             fn rotateY(v: vec3<f32>, angle: f32) -> vec3<f32> {
                 let c = cos(angle);
@@ -216,14 +233,32 @@ async function main() {
                 return vec3<f32>(v.x, c*v.y - s*v.z, s*v.y + c*v.z);
             }
 
+            fn perspective_project(pos: vec3<f32>, near: f32, far: f32, cameraZ: f32) -> vec4<f32> {
+                // Simple perspective projection
+                let fovY = 1.0; // ~53 degrees
+                let aspect = 1.0; // You can pass aspect as a uniform if needed
+                let f = 1.0 / tan(fovY * 0.5);
+                let nf = 1.0 / (near - far);
+                let x = pos.x * f / aspect;
+                let y = pos.y * f;
+                let z = (pos.z - cameraZ);
+                let projZ = (far + near) * nf * z + (2.0 * far * near) * nf;
+                return vec4<f32>(x, y, projZ, -z);
+            }
+
             @vertex
             fn vs_main(@location(0) particle_pos: vec3<f32>, @location(1) quad_pos: vec2<f32>) -> VSOutput {
                 var out: VSOutput;
                 var pos = particle_pos;
-                pos = rotateY(pos, render_params.z);
-                pos = rotateX(pos, render_params.y);
-                pos *= render_params.w;
-                out.pos = vec4<f32>(pos + vec3<f32>(quad_pos * render_params.x, 0.0), 1.0);
+                // Rotate relative to screen axes: Y first (horizontal drag), then X (vertical drag)
+                pos = rotateY(pos, get_rotY()); // horizontal drag, screen Y axis
+                pos = rotateX(pos, -get_rotX()); // vertical drag, screen X axis, reversed
+                pos *= get_zoom(); // zoom
+                let near = get_near();
+                let far = get_far();
+                let cameraZ = get_cameraZ();
+                let worldPos = pos + vec3<f32>(quad_pos * get_size(), 0.0);
+                out.pos = perspective_project(worldPos, near, far, cameraZ);
                 out.uv = quad_pos * 0.5 + 0.5;
                 return out;
             }
@@ -243,9 +278,10 @@ async function main() {
                 }
                 return vec4<f32>(0.32, 0.4, 1.0, alpha);
             }
-        `,
+        `
     });
 
+    // Create quad vertex buffer for particle rendering
     const quadVertexBuffer = device.createBuffer({
         size: 4 * 2 * 4, // 4 vertices, 2 floats (xy) each, 4 bytes per float
         usage: GPUBufferUsage.VERTEX,
