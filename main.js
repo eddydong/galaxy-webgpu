@@ -13,21 +13,23 @@ async function main() {
     let lastMouseY = 0;
 
     const params = {
-        numParticles: 20000,
+        numParticles: 15000,
         particleSize: 0.02,
-        G: 0.00001, // internal value
-        dt: 0.0003, // internal value
+        G: 0.00003, // internal value (30 * 0.000001)
+        dt: 0.0003, // internal value (30 * 0.00001)
     };    
 
     // [particleSize, zoom, rotX, rotY, near, far, cameraZ]
-    const near = 0.1;
-    const far = 10.0;
-    const cameraZ = 2.0;
+    const near = 0.01;
+    const far = 100.0;
+    let cameraZ = 2.0;
 
     canvas.addEventListener('wheel', (e) => {
         e.preventDefault();
         zoom *= Math.exp(-e.deltaY * 0.001); // normal zoom direction
         zoom = Math.max(0.1, Math.min(zoom, 10.0));
+        // Keep the center at the screen center by adjusting cameraZ
+        cameraZ = 2.0 / zoom;
     });
 
     canvas.addEventListener('mousedown', (e) => {
@@ -268,7 +270,7 @@ async function main() {
                 } else if (dist < 0.08) {
                     alpha = mix(1.0, 0.15, (dist - 0.06) / 0.02);
                 } else if (dist < 0.5) {
-                    alpha = mix(0.12, 0.0, (dist - 0.08) / 0.42);
+                    alpha = mix(0.15, 0.0, (dist - 0.08) / 0.42);
                 } else {
                     alpha = 0.0;
                 }
@@ -388,12 +390,12 @@ async function main() {
 
     controlPanel.innerHTML = `
       <label style="display:flex;flex-direction:column;align-items:center;gap:6px;">
-        <span>Gravity (G): <span id="g-value">${Math.round(params.G / 0.00001)}</span></span>
-        <input type="range" id="g-slider" min="1" max="100" step="1" value="${Math.round(params.G / 0.00001)}" style="width:160px;">
+        <span>Gravity (G): <span id="g-value">30</span></span>
+        <input type="range" id="g-slider" min="1" max="100" step="1" value="30" style="width:160px;">
       </label>
       <label style="display:flex;flex-direction:column;align-items:center;gap:6px;">
-        <span>Time Step (dt): <span id="dt-value">${Math.round(params.dt / 0.00001)}</span></span>
-        <input type="range" id="dt-slider" min="1" max="100" step="1" value="${Math.round(params.dt / 0.00001)}" style="width:160px;">
+        <span>Time Step (dt): <span id="dt-value">30</span></span>
+        <input type="range" id="dt-slider" min="1" max="100" step="1" value="30" style="width:160px;">
       </label>
       <label style="display:flex;flex-direction:column;align-items:center;gap:6px;">
         <span>Star Count: <span id="star-value">${params.numParticles}</span></span>
@@ -412,7 +414,8 @@ async function main() {
 
     gSlider.addEventListener('input', () => {
         const gSliderValue = parseInt(gSlider.value);
-        params.G = gSliderValue * 0.00001;
+        // Gravity range: min 0.000001 (slider 1), max 0.01 (slider 100)
+        params.G = gSliderValue * 0.000001 * 10;
         gValue.textContent = gSliderValue;
         device.queue.writeBuffer(simParamsBuffer, 0, new Float32Array([params.G, params.dt]));
     });
@@ -470,6 +473,7 @@ async function main() {
     let frameCount = 0;
 
     let t = 0;
+    let prevFrameTime = performance.now();
     function frame() {
         const currentTime = performance.now();
         frameCount++;
@@ -479,15 +483,24 @@ async function main() {
             lastTime = currentTime;
         }
 
+        // Calculate frame time in seconds
+        const frameTimeSec = Math.max((currentTime - prevFrameTime) * 0.001, 0.001); // avoid zero
+        prevFrameTime = currentTime;
+
         // Update camera params
         renderParamsData[1] = zoom;
         renderParamsData[2] = rotX;
         renderParamsData[3] = rotY;
-        // near, far, cameraZ remain constant
+        // near, far remain constant
+        renderParamsData[6] = cameraZ;
         device.queue.writeBuffer(renderParamsBuffer, 0, renderParamsData);
 
+        // Scale dt by frame time for consistent simulation speed
+        const effectiveDt = params.dt * (frameTimeSec / (1/60)); // normalized to 60fps
+        device.queue.writeBuffer(simParamsBuffer, 0, new Float32Array([params.G, effectiveDt]));
+
         const commandEncoder = device.createCommandEncoder();
-        
+
         // Compute pass
         const computePass = commandEncoder.beginComputePass();
         computePass.setPipeline(computePipeline);
