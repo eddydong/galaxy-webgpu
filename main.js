@@ -1,26 +1,7 @@
 async function main() {
     const canvas = document.getElementById('webgpu-canvas');
 
-    // Add blend mode toggle UI
-    const blendSwitch = document.createElement('label');
-    blendSwitch.style.position = 'fixed';
-    blendSwitch.style.top = '16px';
-    blendSwitch.style.left = '16px';
-    blendSwitch.style.zIndex = '10';
-    blendSwitch.style.background = 'rgba(0,0,0,0.5)';
-    blendSwitch.style.color = 'white';
-    blendSwitch.style.padding = '6px 12px';
-    blendSwitch.style.borderRadius = '8px';
-    blendSwitch.style.fontFamily = 'sans-serif';
-    blendSwitch.innerHTML = `<input type="checkbox" id="blend-toggle" checked> Lighter Blend`;
-    document.body.appendChild(blendSwitch);
-
-    const blendToggle = blendSwitch.querySelector('#blend-toggle');
-    blendToggle.addEventListener('change', () => {
-        useLighterBlend = blendToggle.checked;
-        recreateRenderPipeline();
-    });
-
+    // Always use lighter blend mode
     let useLighterBlend = true;
 
     // Camera controls
@@ -34,8 +15,8 @@ async function main() {
     const params = {
         numParticles: 20000,
         particleSize: 0.02,
-        G: 0.00001, 
-        dt: 0.0003,
+        G: 0.00001, // internal value
+        dt: 0.0003, // internal value
     };    
 
     // [particleSize, zoom, rotX, rotY, near, far, cameraZ]
@@ -77,6 +58,21 @@ async function main() {
     window.addEventListener('resize', setCanvasSize);
 
     if (!navigator.gpu) {
+        // Show notice for non-WebGPU browsers
+        const notice = document.createElement('div');
+        notice.textContent = 'WebGPU is not supported in this browser. Please use Google Chrome or other WebGPU-ready browsers.';
+        notice.style.position = 'fixed';
+        notice.style.top = '50%';
+        notice.style.left = '50%';
+        notice.style.transform = 'translate(-50%, -50%)';
+        notice.style.background = 'rgba(0,0,0,0.85)';
+        notice.style.color = 'white';
+        notice.style.padding = '32px 48px';
+        notice.style.borderRadius = '16px';
+        notice.style.fontSize = '1.3em';
+        notice.style.fontFamily = 'sans-serif';
+        notice.style.zIndex = '100';
+        document.body.appendChild(notice);
         throw new Error("WebGPU not supported on this browser.");
     }
 
@@ -374,6 +370,101 @@ async function main() {
     }
     recreateRenderPipeline();
 
+    // Add control panel at bottom center
+    const controlPanel = document.createElement('div');
+    controlPanel.style.position = 'fixed';
+    controlPanel.style.left = '50%';
+    controlPanel.style.bottom = '32px';
+    controlPanel.style.transform = 'translateX(-50%)';
+    controlPanel.style.zIndex = '20';
+    controlPanel.style.background = 'rgba(0,0,0,0.7)';
+    controlPanel.style.color = 'white';
+    controlPanel.style.padding = '18px 32px';
+    controlPanel.style.borderRadius = '16px';
+    controlPanel.style.fontFamily = 'sans-serif';
+    controlPanel.style.display = 'flex';
+    controlPanel.style.flexDirection = 'row';
+    controlPanel.style.gap = '32px';
+
+    controlPanel.innerHTML = `
+      <label style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+        <span>Gravity (G): <span id="g-value">${Math.round(params.G / 0.00001)}</span></span>
+        <input type="range" id="g-slider" min="1" max="100" step="1" value="${Math.round(params.G / 0.00001)}" style="width:160px;">
+      </label>
+      <label style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+        <span>Time Step (dt): <span id="dt-value">${Math.round(params.dt / 0.00001)}</span></span>
+        <input type="range" id="dt-slider" min="1" max="100" step="1" value="${Math.round(params.dt / 0.00001)}" style="width:160px;">
+      </label>
+      <label style="display:flex;flex-direction:column;align-items:center;gap:6px;">
+        <span>Star Count: <span id="star-value">${params.numParticles}</span></span>
+        <input type="range" id="star-slider" min="100" max="30000" step="100" value="${params.numParticles}" style="width:160px;">
+      </label>
+    `;
+    document.body.appendChild(controlPanel);
+
+    // Control panel slider logic
+    const gSlider = controlPanel.querySelector('#g-slider');
+    const gValue = controlPanel.querySelector('#g-value');
+    const dtSlider = controlPanel.querySelector('#dt-slider');
+    const dtValue = controlPanel.querySelector('#dt-value');
+    const starSlider = controlPanel.querySelector('#star-slider');
+    const starValue = controlPanel.querySelector('#star-value');
+
+    gSlider.addEventListener('input', () => {
+        const gSliderValue = parseInt(gSlider.value);
+        params.G = gSliderValue * 0.00001;
+        gValue.textContent = gSliderValue;
+        device.queue.writeBuffer(simParamsBuffer, 0, new Float32Array([params.G, params.dt]));
+    });
+    dtSlider.addEventListener('input', () => {
+        const dtSliderValue = parseInt(dtSlider.value);
+        params.dt = dtSliderValue * 0.00001;
+        dtValue.textContent = dtSliderValue;
+        device.queue.writeBuffer(simParamsBuffer, 0, new Float32Array([params.G, params.dt]));
+    });
+    starSlider.addEventListener('change', () => {
+        params.numParticles = parseInt(starSlider.value);
+        starValue.textContent = params.numParticles;
+        // Re-initialize particles and buffers
+        const newParticleData = new Float32Array(params.numParticles * 8);
+        for (let i = 0; i < params.numParticles; i++) {
+            let u = Math.random();
+            let v = Math.random();
+            let w = Math.random();
+            let theta = 2 * Math.PI * u;
+            let phi = Math.acos(2 * v - 1);
+            let r = Math.cbrt(w) * 0.9;
+            let x = r * Math.sin(phi) * Math.cos(theta);
+            let y = r * Math.sin(phi) * Math.sin(theta);
+            let z = r * Math.cos(phi);
+            const mass = 0.5 + Math.random() * 99.5;
+            newParticleData[i * 8 + 0] = x;
+            newParticleData[i * 8 + 1] = y;
+            newParticleData[i * 8 + 2] = z;
+            newParticleData[i * 8 + 3] = mass;
+            newParticleData[i * 8 + 4] = 0;
+            newParticleData[i * 8 + 5] = 0;
+            newParticleData[i * 8 + 6] = 0;
+            newParticleData[i * 8 + 7] = 0;
+        }
+        // Resize buffers
+        particleBuffers[0].destroy && particleBuffers[0].destroy();
+        particleBuffers[1].destroy && particleBuffers[1].destroy();
+        particleBuffers[0] = device.createBuffer({
+            size: newParticleData.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+            mappedAtCreation: true,
+        });
+        particleBuffers[1] = device.createBuffer({
+            size: newParticleData.byteLength,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        new Float32Array(particleBuffers[0].getMappedRange()).set(newParticleData);
+        particleBuffers[0].unmap();
+        // Reset frame counter to avoid buffer mismatch
+        t = 0;
+    });
+
     const fpsCounter = document.getElementById('fps-counter');
     let lastTime = performance.now();
     let frameCount = 0;
@@ -410,7 +501,6 @@ async function main() {
         });
         computePass.setBindGroup(0, computeBindGroup);
         computePass.dispatchWorkgroups(Math.ceil(params.numParticles / 64));
-        // ...existing code...
         computePass.end();
 
         // Render pass
