@@ -483,8 +483,8 @@ async function main() {
             lastTime = currentTime;
         }
 
-        // Calculate frame time in seconds
-        const frameTimeSec = Math.max((currentTime - prevFrameTime) * 0.001, 0.001); // avoid zero
+        // Calculate frame time in seconds, and clamp to avoid large jumps
+        const frameTimeSec = Math.min(Math.max((currentTime - prevFrameTime) * 0.001, 0.001), 1/30);
         prevFrameTime = currentTime;
 
         // Update camera params
