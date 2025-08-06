@@ -91,10 +91,9 @@ async function main() {
         format: canvasFormat,
     });
 
-    // pos, vel
-    const particleAndVelocityData = new Float32Array(params.numParticles * 8); 
+    const particleData = new Float32Array(params.numParticles * 12); 
 
-    // Initialize particles in a disk, each with random mass
+    // Initialize particles in a disk, each with random mass and color
     for (let i = 0; i < params.numParticles; i++) {
         // Random position in a ball (uniformly distributed in a sphere)
         let u = Math.random();
@@ -107,35 +106,45 @@ async function main() {
         let y = r * Math.sin(phi) * Math.sin(theta);
         let z = r * Math.cos(phi);
 
-        // Assign random mass between 0.5 and 5.0
+        // Assign random mass between 0.5 and 100.0
         const mass = 0.5 + Math.random() * 99.5;
 
         // Position
-        particleAndVelocityData[i * 8 + 0] = x;
-        particleAndVelocityData[i * 8 + 1] = y;
-        particleAndVelocityData[i * 8 + 2] = z;
-        particleAndVelocityData[i * 8 + 3] = mass;
+        particleData[i * 12 + 0] = x;
+        particleData[i * 12 + 1] = y;
+        particleData[i * 12 + 2] = z;
+        particleData[i * 12 + 3] = mass;
 
-        // Initial velocity: zero (no preferred orbit direction in a ball)
-        particleAndVelocityData[i * 8 + 4] = 0;
-        particleAndVelocityData[i * 8 + 5] = 0;
-        particleAndVelocityData[i * 8 + 6] = 0;
-        particleAndVelocityData[i * 8 + 7] = 0; // unused
+        // Initial velocity: zero
+        particleData[i * 12 + 4] = 0;
+        particleData[i * 12 + 5] = 0;
+        particleData[i * 12 + 6] = 0;
+        
+        // Radius based on mass
+        const radius = 0.005 + (mass / 100.0) * 0.04;
+        particleData[i * 12 + 7] = radius;
+
+        // Color is now calculated in the shader based on velocity.
+        // These slots are unused but need to be present for stride.
+        particleData[i * 12 + 8] = 0;
+        particleData[i * 12 + 9] = 0;
+        particleData[i * 12 + 10] = 0;
+        particleData[i * 12 + 11] = 0; // unused
     }
 
     const particleBuffers = [
         device.createBuffer({
-            size: particleAndVelocityData.byteLength,
+            size: particleData.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
             mappedAtCreation: true,
         }),
         device.createBuffer({
-            size: particleAndVelocityData.byteLength,
+            size: particleData.byteLength,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
         })
     ];
 
-    new Float32Array(particleBuffers[0].getMappedRange()).set(particleAndVelocityData);
+    new Float32Array(particleBuffers[0].getMappedRange()).set(particleData);
     particleBuffers[0].unmap();
 
     const simParamsData = new Float32Array([params.G, params.dt]);
@@ -157,6 +166,7 @@ async function main() {
             struct Particle {
                 pos: vec4<f32>,
                 vel: vec4<f32>,
+                color: vec4<f32>,
             };
 
             struct Particles {
@@ -204,6 +214,7 @@ async function main() {
             struct VSOutput {
                 @builtin(position) pos: vec4<f32>,
                 @location(0) uv: vec2<f32>,
+                @location(1) color: vec3<f32>,
             };
 
             // [size, zoom, rotX, rotY, near, far, cameraZ]
@@ -245,7 +256,12 @@ async function main() {
             }
 
             @vertex
-            fn vs_main(@location(0) particle_pos: vec3<f32>, @location(1) quad_pos: vec2<f32>) -> VSOutput {
+            fn vs_main(
+                @location(0) particle_pos: vec3<f32>, 
+                @location(1) particle_color_unused: vec3<f32>,
+                @location(2) quad_pos: vec2<f32>,
+                @location(3) particle_vel: vec4<f32>
+            ) -> VSOutput {
                 var out: VSOutput;
                 var pos = particle_pos;
                 // Rotate relative to screen axes: Y first (horizontal drag), then X (vertical drag)
@@ -255,14 +271,40 @@ async function main() {
                 let near = get_near();
                 let far = get_far();
                 let cameraZ = get_cameraZ();
-                let worldPos = pos + vec3<f32>(quad_pos * get_size(), 0.0);
+                let particle_radius = particle_vel.w;
+                let worldPos = pos + vec3<f32>(quad_pos * particle_radius, 0.0);
                 out.pos = perspective_project(worldPos, near, far, cameraZ);
                 out.uv = quad_pos * 0.5 + 0.5;
+
+                // Calculate color based on velocity
+                let speed = length(particle_vel.xyz);
+                let speed_t = smoothstep(0.0, 8.0, speed); // normalize speed to 0-1
+
+                // Star color spectrum (OBAFGKM): blue -> blue-white -> white -> yellow -> orange -> red
+                var color: vec3<f32>;
+                if (speed_t < 0.15) { // O/B: Blue
+                    let t = speed_t / 0.15;
+                    color = mix(vec3<f32>(0.3, 0.5, 1.0), vec3<f32>(0.7, 0.8, 1.0), t); // blue to blue-white
+                } else if (speed_t < 0.35) { // A/F: Blue-white to white
+                    let t = (speed_t - 0.15) / 0.2;
+                    color = mix(vec3<f32>(0.7, 0.8, 1.0), vec3<f32>(1.0, 1.0, 1.0), t); // blue-white to white
+                } else if (speed_t < 0.55) { // G: White to yellow
+                    let t = (speed_t - 0.35) / 0.2;
+                    color = mix(vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(1.0, 1.0, 0.6), t); // white to yellow
+                } else if (speed_t < 0.75) { // K: Yellow to orange
+                    let t = (speed_t - 0.55) / 0.2;
+                    color = mix(vec3<f32>(1.0, 1.0, 0.6), vec3<f32>(1.0, 0.7, 0.3), t); // yellow to orange
+                } else { // M: Orange to red
+                    let t = (speed_t - 0.75) / 0.25;
+                    color = mix(vec3<f32>(1.0, 0.7, 0.3), vec3<f32>(1.0, 0.2, 0.2), t); // orange to red
+                }
+                out.color = color;
+
                 return out;
             }
 
             @fragment
-            fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
+            fn fs_main(@location(0) uv: vec2<f32>, @location(1) color: vec3<f32>) -> @location(0) vec4<f32> {
                 let dist = distance(uv, vec2<f32>(0.5, 0.5));
                 var alpha: f32;
                 if (dist < 0.06) {
@@ -274,7 +316,7 @@ async function main() {
                 } else {
                     alpha = 0.0;
                 }
-                return vec4<f32>(0.32, 0.4, 1.0, alpha);
+                return vec4<f32>(color, alpha);
             }
         `
     });
@@ -310,19 +352,31 @@ async function main() {
                 entryPoint: 'vs_main',
                 buffers: [
                     {
-                        arrayStride: 32,
+                        arrayStride: 48, // 12 floats * 4 bytes
                         stepMode: 'instance',
-                        attributes: [{
-                            shaderLocation: 0,
-                            offset: 0,
-                            format: 'float32x3',
-                        }],
+                        attributes: [
+                            { // position
+                                shaderLocation: 0,
+                                offset: 0,
+                                format: 'float32x3',
+                            },
+                            { // color
+                                shaderLocation: 1,
+                                offset: 32, // after pos and vel
+                                format: 'float32x3',
+                            },
+                            { // velocity
+                                shaderLocation: 3,
+                                offset: 16,
+                                format: 'float32x4',
+                            }
+                        ],
                     },
                     {
                         arrayStride: 8,
                         stepMode: 'vertex',
                         attributes: [{
-                            shaderLocation: 1,
+                            shaderLocation: 2, // updated from 1
                             offset: 0,
                             format: 'float32x2',
                         }],
@@ -341,8 +395,8 @@ async function main() {
                             operation: 'add',
                         },
                         alpha: {
-                            srcFactor: 'one',
-                            dstFactor: 'one',
+                            srcFactor: 'zero',
+                            dstFactor: 'one-minus-src-alpha',
                             operation: 'add',
                         },
                     } : {
@@ -429,7 +483,7 @@ async function main() {
         params.numParticles = parseInt(starSlider.value);
         starValue.textContent = params.numParticles;
         // Re-initialize particles and buffers
-        const newParticleData = new Float32Array(params.numParticles * 8);
+        const newParticleData = new Float32Array(params.numParticles * 12);
         for (let i = 0; i < params.numParticles; i++) {
             let u = Math.random();
             let v = Math.random();
@@ -441,14 +495,23 @@ async function main() {
             let y = r * Math.sin(phi) * Math.sin(theta);
             let z = r * Math.cos(phi);
             const mass = 0.5 + Math.random() * 99.5;
-            newParticleData[i * 8 + 0] = x;
-            newParticleData[i * 8 + 1] = y;
-            newParticleData[i * 8 + 2] = z;
-            newParticleData[i * 8 + 3] = mass;
-            newParticleData[i * 8 + 4] = 0;
-            newParticleData[i * 8 + 5] = 0;
-            newParticleData[i * 8 + 6] = 0;
-            newParticleData[i * 8 + 7] = 0;
+            newParticleData[i * 12 + 0] = x;
+            newParticleData[i * 12 + 1] = y;
+            newParticleData[i * 12 + 2] = z;
+            newParticleData[i * 12 + 3] = mass;
+            newParticleData[i * 12 + 4] = 0;
+            newParticleData[i * 12 + 5] = 0;
+            newParticleData[i * 12 + 6] = 0;
+            
+            const radius = 0.005 + (mass / 100.0) * 0.04;
+            newParticleData[i * 12 + 7] = radius;
+
+            // Color is now calculated in the shader based on velocity.
+            // These slots are unused but need to be present for stride.
+            newParticleData[i * 12 + 8] = 0;
+            newParticleData[i * 12 + 9] = 0;
+            newParticleData[i * 12 + 10] = 0;
+            newParticleData[i * 12 + 11] = 0; // unused
         }
         // Resize buffers
         particleBuffers[0].destroy && particleBuffers[0].destroy();
