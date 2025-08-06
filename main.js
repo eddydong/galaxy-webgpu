@@ -5,7 +5,7 @@ async function main() {
     let useLighterBlend = true;
 
     // Camera controls
-    let zoom = 0.8; // slightly zoomed out
+    let zoom = 1; // slightly zoomed out
     let rotX = Math.PI; // tilt for better perspective
     let rotY = Math.PI; // rotate around Y axis for better view
     let dragging = false;
@@ -20,14 +20,14 @@ async function main() {
     };    
 
     // [particleSize, zoom, rotX, rotY, near, far, cameraZ]
-    const near = 0.01;
-    const far = 100.0;
+    const near = 0.001;
+    const far = 20.0;
     let cameraZ = 2.0;
 
     canvas.addEventListener('wheel', (e) => {
         e.preventDefault();
         zoom *= Math.exp(-e.deltaY * 0.001); // normal zoom direction
-        zoom = Math.max(0.1, Math.min(zoom, 10.0));
+        zoom = Math.max(0.5, Math.min(zoom, 8));
         // Keep the center at the screen center by adjusting cameraZ
         cameraZ = 2.0 / zoom;
     });
