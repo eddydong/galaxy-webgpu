@@ -1,3 +1,6 @@
+import { setupControlPanel } from './controls.js';
+import { setupUI } from './ui.js';
+
 async function main() {
     const canvas = document.getElementById('webgpu-canvas');
 
@@ -6,14 +9,14 @@ async function main() {
 
     // Camera controls
     let zoom = 1; // slightly zoomed out
-    let rotX = Math.PI; // tilt for better perspective
-    let rotY = Math.PI; // rotate around Y axis for better view
+    let rotX = 0; // tilt for better perspective
+    let rotY = 0; // rotate around Y axis for better view
     let dragging = false;
     let lastMouseX = 0;
     let lastMouseY = 0;
 
     const params = {
-        numParticles: 15000,
+        numParticles: 5000,
         particleSize: 0.02,
         G: 0.00003, // internal value (30 * 0.000001)
         dt: 0.0003, // internal value (30 * 0.00001)
@@ -42,7 +45,7 @@ async function main() {
         if (dragging && e.buttons === 1) {
             const dx = e.clientX - lastMouseX;
             const dy = e.clientY - lastMouseY;
-            rotY -= dx * 0.005; // reversed horizontal drag rotates Y
+            rotY += dx * 0.005; // horizontal drag rotates Y
             rotX -= dy * 0.005; // reversed vertical drag rotates X
             lastMouseX = e.clientX;
             lastMouseY = e.clientY;
@@ -264,9 +267,9 @@ async function main() {
             ) -> VSOutput {
                 var out: VSOutput;
                 var pos = particle_pos;
-                // Rotate relative to screen axes: Y first (horizontal drag), then X (vertical drag)
-                pos = rotateY(pos, get_rotY()); // horizontal drag, screen Y axis
+                // Rotate relative to screen axes: X first (vertical drag), then Y (horizontal drag)
                 pos = rotateX(pos, -get_rotX()); // vertical drag, screen X axis, reversed
+                pos = rotateY(pos, get_rotY()); // horizontal drag, screen Y axis
                 pos *= get_zoom(); // zoom
                 let near = get_near();
                 let far = get_far();
@@ -280,23 +283,20 @@ async function main() {
                 let speed = length(particle_vel.xyz);
                 let speed_t = smoothstep(0.0, 8.0, speed); // normalize speed to 0-1
 
-                // Star color spectrum (OBAFGKM): blue -> blue-white -> white -> yellow -> orange -> red
+                // Star color spectrum: red -> yellow -> green -> blue -> purple
                 var color: vec3<f32>;
-                if (speed_t < 0.15) { // O/B: Blue
+                if (speed_t < 0.15) { // Red to Yellow
                     let t = speed_t / 0.15;
-                    color = mix(vec3<f32>(0.3, 0.5, 1.0), vec3<f32>(0.7, 0.8, 1.0), t); // blue to blue-white
-                } else if (speed_t < 0.35) { // A/F: Blue-white to white
-                    let t = (speed_t - 0.15) / 0.2;
-                    color = mix(vec3<f32>(0.7, 0.8, 1.0), vec3<f32>(1.0, 1.0, 1.0), t); // blue-white to white
-                } else if (speed_t < 0.55) { // G: White to yellow
-                    let t = (speed_t - 0.35) / 0.2;
-                    color = mix(vec3<f32>(1.0, 1.0, 1.0), vec3<f32>(1.0, 1.0, 0.6), t); // white to yellow
-                } else if (speed_t < 0.75) { // K: Yellow to orange
-                    let t = (speed_t - 0.55) / 0.2;
-                    color = mix(vec3<f32>(1.0, 1.0, 0.6), vec3<f32>(1.0, 0.7, 0.3), t); // yellow to orange
-                } else { // M: Orange to red
-                    let t = (speed_t - 0.75) / 0.25;
-                    color = mix(vec3<f32>(1.0, 0.7, 0.3), vec3<f32>(1.0, 0.2, 0.2), t); // orange to red
+                    color = mix(vec3<f32>(1.0, 0.2, 0.0), vec3<f32>(1.0, 1.0, 0.0), t);
+                } else if (speed_t < 0.3) { // Yellow to Green
+                    let t = (speed_t - 0.15) / 0.15;
+                    color = mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.5), t);
+                } else if (speed_t < 0.95) { // Green to Blue
+                    let t = (speed_t - 0.3) / 0.65;
+                    color = mix(vec3<f32>(0.0, 1.0, 0.5), vec3<f32>(0.2, 0.5, 1.0), t);
+                } else { // Blue to UV Purple
+                    let t = (speed_t - 0.95) / 0.05;
+                    color = mix(vec3<f32>(0.2, 0.5, 1.0), vec3<f32>(0.6, 0.2, 1.0), t);
                 }
                 out.color = color;
 
@@ -310,9 +310,9 @@ async function main() {
                 if (dist < 0.06) {
                     alpha = 1.0;
                 } else if (dist < 0.08) {
-                    alpha = mix(1.0, 0.15, (dist - 0.06) / 0.02);
+                    alpha = mix(1.0, 0.2, (dist - 0.06) / 0.02);
                 } else if (dist < 0.5) {
-                    alpha = mix(0.15, 0.0, (dist - 0.08) / 0.42);
+                    alpha = mix(0.2, 0.0, (dist - 0.08) / 0.42);
                 } else {
                     alpha = 0.0;
                 }
@@ -426,112 +426,66 @@ async function main() {
     }
     recreateRenderPipeline();
 
-    // Add control panel at bottom center
-    const controlPanel = document.createElement('div');
-    controlPanel.style.position = 'fixed';
-    controlPanel.style.left = '50%';
-    controlPanel.style.bottom = '32px';
-    controlPanel.style.transform = 'translateX(-50%)';
-    controlPanel.style.zIndex = '20';
-    controlPanel.style.background = 'rgba(0,0,0,0.7)';
-    controlPanel.style.color = 'white';
-    controlPanel.style.padding = '18px 32px';
-    controlPanel.style.borderRadius = '16px';
-    controlPanel.style.fontFamily = 'sans-serif';
-    controlPanel.style.display = 'flex';
-    controlPanel.style.flexDirection = 'row';
-    controlPanel.style.gap = '32px';
 
-    controlPanel.innerHTML = `
-      <label style="display:flex;flex-direction:column;align-items:center;gap:6px;">
-        <span>Gravity (G): <span id="g-value">30</span></span>
-        <input type="range" id="g-slider" min="1" max="100" step="1" value="30" style="width:160px;">
-      </label>
-      <label style="display:flex;flex-direction:column;align-items:center;gap:6px;">
-        <span>Time Step (dt): <span id="dt-value">30</span></span>
-        <input type="range" id="dt-slider" min="1" max="100" step="1" value="30" style="width:160px;">
-      </label>
-      <label style="display:flex;flex-direction:column;align-items:center;gap:6px;">
-        <span>Star Count: <span id="star-value">${params.numParticles}</span></span>
-        <input type="range" id="star-slider" min="100" max="30000" step="100" value="${params.numParticles}" style="width:160px;">
-      </label>
-    `;
-    document.body.appendChild(controlPanel);
+    let autoSpin = true;
+    function toggleAutoSpin(enabled) {
+        autoSpin = enabled;
+    }
 
-    // Control panel slider logic
-    const gSlider = controlPanel.querySelector('#g-slider');
-    const gValue = controlPanel.querySelector('#g-value');
-    const dtSlider = controlPanel.querySelector('#dt-slider');
-    const dtValue = controlPanel.querySelector('#dt-value');
-    const starSlider = controlPanel.querySelector('#star-slider');
-    const starValue = controlPanel.querySelector('#star-value');
-
-    gSlider.addEventListener('input', () => {
-        const gSliderValue = parseInt(gSlider.value);
-        // Gravity range: min 0.000001 (slider 1), max 0.01 (slider 100)
-        params.G = gSliderValue * 0.000001 * 10;
-        gValue.textContent = gSliderValue;
-        device.queue.writeBuffer(simParamsBuffer, 0, new Float32Array([params.G, params.dt]));
-    });
-    dtSlider.addEventListener('input', () => {
-        const dtSliderValue = parseInt(dtSlider.value);
-        params.dt = dtSliderValue * 0.00001;
-        dtValue.textContent = dtSliderValue;
-        device.queue.writeBuffer(simParamsBuffer, 0, new Float32Array([params.G, params.dt]));
-    });
-    starSlider.addEventListener('change', () => {
-        params.numParticles = parseInt(starSlider.value);
-        starValue.textContent = params.numParticles;
-        // Re-initialize particles and buffers
-        const newParticleData = new Float32Array(params.numParticles * 12);
-        for (let i = 0; i < params.numParticles; i++) {
-            let u = Math.random();
-            let v = Math.random();
-            let w = Math.random();
-            let theta = 2 * Math.PI * u;
-            let phi = Math.acos(2 * v - 1);
-            let r = Math.cbrt(w) * 0.9;
-            let x = r * Math.sin(phi) * Math.cos(theta);
-            let y = r * Math.sin(phi) * Math.sin(theta);
-            let z = r * Math.cos(phi);
-            const mass = 0.5 + Math.random() * 99.5;
-            newParticleData[i * 12 + 0] = x;
-            newParticleData[i * 12 + 1] = y;
-            newParticleData[i * 12 + 2] = z;
-            newParticleData[i * 12 + 3] = mass;
-            newParticleData[i * 12 + 4] = 0;
-            newParticleData[i * 12 + 5] = 0;
-            newParticleData[i * 12 + 6] = 0;
-            
-            const radius = 0.005 + (mass / 100.0) * 0.04;
-            newParticleData[i * 12 + 7] = radius;
-
-            // Color is now calculated in the shader based on velocity.
-            // These slots are unused but need to be present for stride.
-            newParticleData[i * 12 + 8] = 0;
-            newParticleData[i * 12 + 9] = 0;
-            newParticleData[i * 12 + 10] = 0;
-            newParticleData[i * 12 + 11] = 0; // unused
-        }
-        // Resize buffers
-        particleBuffers[0].destroy && particleBuffers[0].destroy();
-        particleBuffers[1].destroy && particleBuffers[1].destroy();
-        particleBuffers[0] = device.createBuffer({
-            size: newParticleData.byteLength,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-            mappedAtCreation: true,
-        });
-        particleBuffers[1] = device.createBuffer({
-            size: newParticleData.byteLength,
-            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-        });
-        new Float32Array(particleBuffers[0].getMappedRange()).set(newParticleData);
-        particleBuffers[0].unmap();
-        // Reset frame counter to avoid buffer mismatch
-        t = 0;
+    setupUI();
+    setupControlPanel({
+        params,
+        device,
+        simParamsBuffer,
+        particleBuffers,
+        reinitParticles: () => {
+            // Re-initialize particles and buffers
+            const newParticleData = new Float32Array(params.numParticles * 12);
+            for (let i = 0; i < params.numParticles; i++) {
+                let u = Math.random();
+                let v = Math.random();
+                let w = Math.random();
+                let theta = 2 * Math.PI * u;
+                let phi = Math.acos(2 * v - 1);
+                let r = Math.cbrt(w) * 0.9;
+                let x = r * Math.sin(phi) * Math.cos(theta);
+                let y = r * Math.sin(phi) * Math.sin(theta);
+                let z = r * Math.cos(phi);
+                const mass = 0.5 + Math.random() * 99.5;
+                newParticleData[i * 12 + 0] = x;
+                newParticleData[i * 12 + 1] = y;
+                newParticleData[i * 12 + 2] = z;
+                newParticleData[i * 12 + 3] = mass;
+                newParticleData[i * 12 + 4] = 0;
+                newParticleData[i * 12 + 5] = 0;
+                newParticleData[i * 12 + 6] = 0;
+                const radius = 0.005 + (mass / 100.0) * 0.04;
+                newParticleData[i * 12 + 7] = radius;
+                newParticleData[i * 12 + 8] = 0;
+                newParticleData[i * 12 + 9] = 0;
+                newParticleData[i * 12 + 10] = 0;
+                newParticleData[i * 12 + 11] = 0;
+            }
+            // Resize buffers
+            particleBuffers[0].destroy && particleBuffers[0].destroy();
+            particleBuffers[1].destroy && particleBuffers[1].destroy();
+            particleBuffers[0] = device.createBuffer({
+                size: newParticleData.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+                mappedAtCreation: true,
+            });
+            particleBuffers[1] = device.createBuffer({
+                size: newParticleData.byteLength,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+            });
+            new Float32Array(particleBuffers[0].getMappedRange()).set(newParticleData);
+            particleBuffers[0].unmap();
+            t = 0;
+        },
+        toggleAutoSpin
     });
 
-    const fpsCounter = document.getElementById('fps-counter');
+    const fpsCounter = document.getElementById('fps-counter'); // created by setupUI
     let lastTime = performance.now();
     let frameCount = 0;
 
@@ -549,6 +503,10 @@ async function main() {
         // Calculate frame time in seconds, and clamp to avoid large jumps
         const frameTimeSec = Math.min(Math.max((currentTime - prevFrameTime) * 0.001, 0.001), 1/30);
         prevFrameTime = currentTime;
+
+        if (autoSpin && !dragging) {
+            rotY += 0.001;
+        }
 
         // Update camera params
         renderParamsData[1] = zoom;
