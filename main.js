@@ -17,14 +17,13 @@ async function main() {
 
     const params = {
         numParticles: 5000,
-        particleSize: 0.02,
         G: 0.00003, // internal value (30 * 0.000001)
         dt: 0.0003, // internal value (30 * 0.00001)
     };    
 
-    // [particleSize, zoom, rotX, rotY, near, far, cameraZ]
-    const near = 0.001;
-    const far = 20.0;
+    // [zoom, rotX, rotY, unused, near, far, cameraZ, aspect]
+    const near = 0.01;
+    const far = 10.0;
     let cameraZ = 2.0;
 
     canvas.addEventListener('wheel', (e) => {
@@ -157,7 +156,8 @@ async function main() {
     });
     device.queue.writeBuffer(simParamsBuffer, 0, simParamsData);
 
-    const renderParamsData = new Float32Array([params.particleSize, zoom, rotX, rotY, near, far, cameraZ, 0.0]);
+    const aspect = canvas.width / canvas.height;
+    const renderParamsData = new Float32Array([zoom, rotX, rotY, 0.0, near, far, cameraZ, aspect]);
     const renderParamsBuffer = device.createBuffer({
         size: 8 * 4, // 8 floats (32 bytes)
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -220,19 +220,19 @@ async function main() {
                 @location(1) color: vec3<f32>,
             };
 
-            // [size, zoom, rotX, rotY, near, far, cameraZ]
+            // [zoom, rotX, rotY, unused, near, far, cameraZ, aspect]
             struct RenderParams {
-                params0: vec4<f32>, // [size, zoom, rotX, rotY]
-                params1: vec4<f32>, // [near, far, cameraZ, unused]
+                params0: vec4<f32>, // [zoom, rotX, rotY, unused]
+                params1: vec4<f32>, // [near, far, cameraZ, aspect]
             }
             @group(0) @binding(0) var<uniform> render_params: RenderParams;
-            fn get_size() -> f32 { return render_params.params0.x; }
-            fn get_zoom() -> f32 { return render_params.params0.y; }
-            fn get_rotX() -> f32 { return render_params.params0.z; }
-            fn get_rotY() -> f32 { return render_params.params0.w; }
+            fn get_zoom() -> f32 { return render_params.params0.x; }
+            fn get_rotX() -> f32 { return render_params.params0.y; }
+            fn get_rotY() -> f32 { return render_params.params0.z; }
             fn get_near() -> f32 { return render_params.params1.x; }
             fn get_far() -> f32 { return render_params.params1.y; }
             fn get_cameraZ() -> f32 { return render_params.params1.z; }
+            fn get_aspect() -> f32 { return render_params.params1.w; }
 
             fn rotateY(v: vec3<f32>, angle: f32) -> vec3<f32> {
                 let c = cos(angle);
@@ -248,7 +248,7 @@ async function main() {
             fn perspective_project(pos: vec3<f32>, near: f32, far: f32, cameraZ: f32) -> vec4<f32> {
                 // Simple perspective projection
                 let fovY = 1.0; // ~53 degrees
-                let aspect = 1.0; // You can pass aspect as a uniform if needed
+                let aspect = get_aspect();
                 let f = 1.0 / tan(fovY * 0.5);
                 let nf = 1.0 / (near - far);
                 let x = pos.x * f / aspect;
@@ -509,11 +509,13 @@ async function main() {
         }
 
         // Update camera params
-        renderParamsData[1] = zoom;
-        renderParamsData[2] = rotX;
-        renderParamsData[3] = rotY;
+        renderParamsData[0] = zoom;
+        renderParamsData[1] = rotX;
+        renderParamsData[2] = rotY;
         // near, far remain constant
         renderParamsData[6] = cameraZ;
+        const aspect = canvas.width / canvas.height;
+        renderParamsData[7] = aspect;
         device.queue.writeBuffer(renderParamsBuffer, 0, renderParamsData);
 
         // Scale dt by frame time for consistent simulation speed
