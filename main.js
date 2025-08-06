@@ -281,7 +281,7 @@ async function main() {
 
                 // Calculate color based on velocity
                 let speed = length(particle_vel.xyz);
-                let speed_t = smoothstep(0.0, 8.0, speed); // normalize speed to 0-1
+                let speed_t = smoothstep(0.0, 10.0, speed); // normalize speed to 0-1
 
                 // Star color spectrum: red -> yellow -> green -> blue -> purple
                 var color: vec3<f32>;
@@ -307,12 +307,12 @@ async function main() {
             fn fs_main(@location(0) uv: vec2<f32>, @location(1) color: vec3<f32>) -> @location(0) vec4<f32> {
                 let dist = distance(uv, vec2<f32>(0.5, 0.5));
                 var alpha: f32;
-                if (dist < 0.06) {
-                    alpha = 1.0;
-                } else if (dist < 0.08) {
-                    alpha = mix(1.0, 0.2, (dist - 0.06) / 0.02);
+                if (dist < 0.04) {
+                    alpha = 0.9;
+                } else if (dist < 0.06) {
+                    alpha = mix(0.9, 0.17, (dist - 0.04) / 0.02);
                 } else if (dist < 0.5) {
-                    alpha = mix(0.2, 0.0, (dist - 0.08) / 0.42);
+                    alpha = mix(0.17, 0.0, (dist - 0.06) / 0.44);
                 } else {
                     alpha = 0.0;
                 }

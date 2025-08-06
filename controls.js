@@ -5,15 +5,15 @@ export function setupControlPanel({ params, device, simParamsBuffer, particleBuf
     controlPanel.className = 'control-panel';
     controlPanel.innerHTML = `
       <label class="control-label">
-        <span>Gravity (G): <span id="g-value">30</span></span>
+        <span>Gravity: <span id="g-value">30</span></span>
         <input type="range" id="g-slider" min="1" max="100" step="1" value="30">
       </label>
       <label class="control-label">
-        <span>Time Step (dt): <span id="dt-value">30</span></span>
+        <span>Time Step: <span id="dt-value">30</span></span>
         <input type="range" id="dt-slider" min="1" max="100" step="1" value="30">
       </label>
       <label class="control-label">
-        <span>Star Count: <span id="star-value">${params.numParticles}</span></span>
+        <span>Particles: <span id="star-value">${params.numParticles}</span></span>
         <input type="range" id="star-slider" min="100" max="30000" step="100" value="${params.numParticles}">
       </label>
       <button id="reset-btn" class="reset-button">Reset</button>
