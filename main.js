@@ -17,19 +17,19 @@ async function main() {
 
     const params = {
         numParticles: 5000,
-        G: 0.00003, // internal value (30 * 0.000001)
+        G: 0.0000025, // internal value (0.3 * 0.000001)
         dt: 0.0003, // internal value (30 * 0.00001)
     };    
 
     // [zoom, rotX, rotY, unused, near, far, cameraZ, aspect]
     const near = 0.01;
-    const far = 10.0;
+    const far = 15.0;
     let cameraZ = 2.0;
 
     canvas.addEventListener('wheel', (e) => {
         e.preventDefault();
         zoom *= Math.exp(-e.deltaY * 0.001); // normal zoom direction
-        zoom = Math.max(0.5, Math.min(zoom, 8));
+        zoom = Math.max(0.2, Math.min(zoom, 10));
         // Keep the center at the screen center by adjusting cameraZ
         cameraZ = 2.0 / zoom;
     });
@@ -45,7 +45,7 @@ async function main() {
             const dx = e.clientX - lastMouseX;
             const dy = e.clientY - lastMouseY;
             rotY += dx * 0.005; // horizontal drag rotates Y
-            rotX -= dy * 0.005; // reversed vertical drag rotates X
+            rotX -= dy * 0.005; // vertical drag rotates X
             lastMouseX = e.clientX;
             lastMouseY = e.clientY;
         }
@@ -93,46 +93,49 @@ async function main() {
         format: canvasFormat,
     });
 
-    const particleData = new Float32Array(params.numParticles * 12); 
+    function createParticleData(numParticles) {
+        const data = new Float32Array(numParticles * 12);
+        for (let i = 0; i < numParticles; i++) {
+            // Random position in a ball (uniformly distributed in a sphere)
+            let u = Math.random();
+            let v = Math.random();
+            let w = Math.random();
+            let theta = 2 * Math.PI * u;
+            let phi = Math.acos(2 * v - 1);
+            let r = Math.cbrt(w) * 0.9; // radius, cube root for uniform sphere
+            let x = r * Math.sin(phi) * Math.cos(theta);
+            let y = r * Math.sin(phi) * Math.sin(theta);
+            let z = r * Math.cos(phi);
 
-    // Initialize particles in a disk, each with random mass and color
-    for (let i = 0; i < params.numParticles; i++) {
-        // Random position in a ball (uniformly distributed in a sphere)
-        let u = Math.random();
-        let v = Math.random();
-        let w = Math.random();
-        let theta = 2 * Math.PI * u;
-        let phi = Math.acos(2 * v - 1);
-        let r = Math.cbrt(w) * 0.9; // radius, cube root for uniform sphere
-        let x = r * Math.sin(phi) * Math.cos(theta);
-        let y = r * Math.sin(phi) * Math.sin(theta);
-        let z = r * Math.cos(phi);
+            // Assign random mass, skewed towards lower values
+            const mass = 0.01 + Math.pow(Math.random(), 3) * 9999.9;
 
-        // Assign random mass between 0.5 and 100.0
-        const mass = 0.5 + Math.random() * 99.5;
+            // Position
+            data[i * 12 + 0] = x;
+            data[i * 12 + 1] = y;
+            data[i * 12 + 2] = z;
+            data[i * 12 + 3] = mass;
 
-        // Position
-        particleData[i * 12 + 0] = x;
-        particleData[i * 12 + 1] = y;
-        particleData[i * 12 + 2] = z;
-        particleData[i * 12 + 3] = mass;
+            // Initial velocity: zero
+            data[i * 12 + 4] = 0;
+            data[i * 12 + 5] = 0;
+            data[i * 12 + 6] = 0;
+            
+            // Radius based on mass (mass is proportional to volume, so radius is proportional to cbrt(mass))
+            const radius = 0.01 + Math.cbrt(mass / 10000.0) * 0.04;
+            data[i * 12 + 7] = radius;
 
-        // Initial velocity: zero
-        particleData[i * 12 + 4] = 0;
-        particleData[i * 12 + 5] = 0;
-        particleData[i * 12 + 6] = 0;
-        
-        // Radius based on mass
-        const radius = 0.005 + (mass / 100.0) * 0.04;
-        particleData[i * 12 + 7] = radius;
-
-        // Color is now calculated in the shader based on velocity.
-        // These slots are unused but need to be present for stride.
-        particleData[i * 12 + 8] = 0;
-        particleData[i * 12 + 9] = 0;
-        particleData[i * 12 + 10] = 0;
-        particleData[i * 12 + 11] = 0; // unused
+            // Color is now calculated in the shader based on velocity.
+            // These slots are unused but need to be present for stride.
+            data[i * 12 + 8] = 0;
+            data[i * 12 + 9] = 0;
+            data[i * 12 + 10] = 0;
+            data[i * 12 + 11] = 0; // unused
+        }
+        return data;
     }
+
+    const particleData = createParticleData(params.numParticles);
 
     const particleBuffers = [
         device.createBuffer({
@@ -281,7 +284,7 @@ async function main() {
 
                 // Calculate color based on velocity
                 let speed = length(particle_vel.xyz);
-                let speed_t = smoothstep(0.0, 10.0, speed); // normalize speed to 0-1
+                let speed_t = smoothstep(0.0, 20.0, speed); // normalize speed to 0-1
 
                 // Star color spectrum: red -> yellow -> green -> blue -> purple
                 var color: vec3<f32>;
@@ -293,10 +296,10 @@ async function main() {
                     color = mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.5), t);
                 } else if (speed_t < 0.95) { // Green to Blue
                     let t = (speed_t - 0.3) / 0.65;
-                    color = mix(vec3<f32>(0.0, 1.0, 0.5), vec3<f32>(0.2, 0.5, 1.0), t);
+                    color = mix(vec3<f32>(0.0, 1.0, 0.5), vec3<f32>(0.1, 0.1, 0.8), t);
                 } else { // Blue to UV Purple
-                    let t = (speed_t - 0.95) / 0.05;
-                    color = mix(vec3<f32>(0.2, 0.5, 1.0), vec3<f32>(0.6, 0.2, 1.0), t);
+                    let t = (speed_t - 0.9) / 0.05;
+                    color = mix(vec3<f32>(0.1, 0.1, 0.8), vec3<f32>(0.15, 0.1, 0.7), t);
                 }
                 out.color = color;
 
@@ -439,33 +442,7 @@ async function main() {
         simParamsBuffer,
         particleBuffers,
         reinitParticles: () => {
-            // Re-initialize particles and buffers
-            const newParticleData = new Float32Array(params.numParticles * 12);
-            for (let i = 0; i < params.numParticles; i++) {
-                let u = Math.random();
-                let v = Math.random();
-                let w = Math.random();
-                let theta = 2 * Math.PI * u;
-                let phi = Math.acos(2 * v - 1);
-                let r = Math.cbrt(w) * 0.9;
-                let x = r * Math.sin(phi) * Math.cos(theta);
-                let y = r * Math.sin(phi) * Math.sin(theta);
-                let z = r * Math.cos(phi);
-                const mass = 0.5 + Math.random() * 99.5;
-                newParticleData[i * 12 + 0] = x;
-                newParticleData[i * 12 + 1] = y;
-                newParticleData[i * 12 + 2] = z;
-                newParticleData[i * 12 + 3] = mass;
-                newParticleData[i * 12 + 4] = 0;
-                newParticleData[i * 12 + 5] = 0;
-                newParticleData[i * 12 + 6] = 0;
-                const radius = 0.005 + (mass / 100.0) * 0.04;
-                newParticleData[i * 12 + 7] = radius;
-                newParticleData[i * 12 + 8] = 0;
-                newParticleData[i * 12 + 9] = 0;
-                newParticleData[i * 12 + 10] = 0;
-                newParticleData[i * 12 + 11] = 0;
-            }
+            const newParticleData = createParticleData(params.numParticles);
             // Resize buffers
             particleBuffers[0].destroy && particleBuffers[0].destroy();
             particleBuffers[1].destroy && particleBuffers[1].destroy();

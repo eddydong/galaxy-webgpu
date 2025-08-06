@@ -5,7 +5,7 @@ export function setupControlPanel({ params, device, simParamsBuffer, particleBuf
     controlPanel.className = 'control-panel';
     controlPanel.innerHTML = `
       <label class="control-label">
-        <span>Gravity: <span id="g-value">30</span></span>
+        <span>Gravity: <span id="g-value">25</span></span>
         <input type="range" id="g-slider" min="1" max="100" step="1" value="30">
       </label>
       <label class="control-label">
@@ -37,7 +37,7 @@ export function setupControlPanel({ params, device, simParamsBuffer, particleBuf
 
     gSlider.addEventListener('input', () => {
         const gSliderValue = parseInt(gSlider.value);
-        params.G = gSliderValue * 0.000001 * 10;
+        params.G = gSliderValue * 0.0000001;
         gValue.textContent = gSliderValue;
         device.queue.writeBuffer(simParamsBuffer, 0, new Float32Array([params.G, params.dt]));
     });
