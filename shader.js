@@ -66,18 +66,31 @@ export function renderShaderModule(device){
             };
 
             // [zoom, rotX, rotY, unused, near, far, cameraZ, aspect]
+            // Render params with view rotation matrix rows
+            // [zoom, unused0, unused1, unused2]
+            // [near, far, cameraZ, aspect]
+            // viewRow0, viewRow1, viewRow2, viewRow3 (mat4, row-major, last row typically 0,0,0,1)
             struct RenderParams {
-                params0: vec4<f32>, // [zoom, rotX, rotY, unused]
-                params1: vec4<f32>, // [near, far, cameraZ, aspect]
-            }
+                params0: vec4<f32>,
+                params1: vec4<f32>,
+                viewRow0: vec4<f32>,
+                viewRow1: vec4<f32>,
+                viewRow2: vec4<f32>,
+                viewRow3: vec4<f32>,
+            };
             @group(0) @binding(0) var<uniform> render_params: RenderParams;
             fn get_zoom() -> f32 { return render_params.params0.x; }
-            fn get_rotX() -> f32 { return render_params.params0.y; }
-            fn get_rotY() -> f32 { return render_params.params0.z; }
             fn get_near() -> f32 { return render_params.params1.x; }
             fn get_far() -> f32 { return render_params.params1.y; }
             fn get_cameraZ() -> f32 { return render_params.params1.z; }
             fn get_aspect() -> f32 { return render_params.params1.w; }
+            fn apply_view(v: vec3<f32>) -> vec3<f32> {
+                return vec3<f32>(
+                    dot(render_params.viewRow0.xyz, v),
+                    dot(render_params.viewRow1.xyz, v),
+                    dot(render_params.viewRow2.xyz, v)
+                );
+            }
 
             fn rotateY(v: vec3<f32>, angle: f32) -> vec3<f32> {
                 let c = cos(angle);
@@ -112,8 +125,8 @@ export function renderShaderModule(device){
                 var out: VSOutput;
                 var pos = particle_pos;
                 // Rotate relative to screen axes: X first (vertical drag), then Y (horizontal drag)
-                pos = rotateX(pos, -get_rotX()); // vertical drag, screen X axis, reversed
-                pos = rotateY(pos, get_rotY()); // horizontal drag, screen Y axis
+                // Apply view rotation matrix (screen-space controlled orientation)
+                pos = apply_view(pos);
                 // Camera dolly zoom: we no longer scale world positions; zoom affects only cameraZ in JS
                 let near = get_near();
                 let far = get_far();

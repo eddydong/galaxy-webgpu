@@ -9,9 +9,30 @@ async function main() {
     let useLighterBlend = true;
 
     // Camera controls
-    let zoom = 1; // slightly zoomed out
-    let rotX = 0; // tilt for better perspective
-    let rotY = 0; // rotate around Y axis for better view
+        let zoom = 1;
+        // Acquire gl-matrix (supports both global UMD and optional ESM fallback)
+        let glx = window.glMatrix;
+        if (!glx || !glx.mat4) {
+            try {
+                const mod = await import('https://cdn.jsdelivr.net/npm/gl-matrix@3.4.3/esm/index.js');
+                glx = mod;
+            } catch (e) {
+                console.error('Failed to load gl-matrix module', e);
+            }
+        }
+        const mat4 = glx?.mat4;
+        const vec3 = glx?.vec3;
+        const quat = glx?.quat;
+        if (!mat4 || !vec3 || !quat) {
+            throw new Error('gl-matrix not available (mat4/vec3/quat missing)');
+        }
+        // View rotation matrix (mat4) separate from simulation space
+        const viewMat = mat4.create(); // identity
+        const tmpMat = mat4.create();
+        const tmpQuat = quat.create();
+        // Reusable vectors
+        const vRight = vec3.fromValues(1,0,0);
+        const vUp = vec3.fromValues(0,1,0);
     const near = 0.001;
     const far = 30.0;
     let cameraZ = 2.0;
@@ -43,13 +64,51 @@ async function main() {
     });
     window.addEventListener('mouseup', () => { dragging = false; });
     window.addEventListener('mousemove', (e) => {
-        if (dragging && e.buttons === 1) {
-            const dx = e.clientX - lastMouseX;
-            const dy = e.clientY - lastMouseY;
-            rotY += dx * 0.005; // horizontal drag rotates Y
-            rotX -= dy * 0.005; // vertical drag rotates X
-            lastMouseX = e.clientX;
-            lastMouseY = e.clientY;
+            if (dragging && e.buttons === 1) {
+                const dx = e.clientX - lastMouseX;
+                const dy = e.clientY - lastMouseY;
+                lastMouseX = e.clientX;
+                lastMouseY = e.clientY;
+
+                // Derive current basis vectors from viewMat
+                const right = vec3.set(vRight, viewMat[0], viewMat[1], viewMat[2]);
+                const up = vec3.set(vUp, viewMat[4], viewMat[5], viewMat[6]);
+                vec3.normalize(right, right);
+                vec3.normalize(up, up);
+
+                const pitchAngle = -dy * 0.005; // vertical drag: rotate around screen-right
+                const yawAngle = -dx * 0.005;   // reversed horizontal drag
+
+                // Yaw (around up)
+                quat.setAxisAngle(tmpQuat, up, yawAngle);
+                mat4.fromQuat(tmpMat, tmpQuat);
+                mat4.multiply(viewMat, tmpMat, viewMat);
+
+                // Pitch (around right) - recompute right after yaw
+                right[0] = viewMat[0]; right[1] = viewMat[1]; right[2] = viewMat[2];
+                vec3.normalize(right, right);
+                quat.setAxisAngle(tmpQuat, right, pitchAngle);
+                mat4.fromQuat(tmpMat, tmpQuat);
+                mat4.multiply(viewMat, tmpMat, viewMat);
+
+                // Orthonormalize (Gram-Schmidt) to prevent drift
+                const r0x = viewMat[0], r0y = viewMat[1], r0z = viewMat[2];
+                const r1x = viewMat[4], r1y = viewMat[5], r1z = viewMat[6];
+                let len0 = Math.hypot(r0x,r0y,r0z);
+                viewMat[0]=r0x/len0; viewMat[1]=r0y/len0; viewMat[2]=r0z/len0;
+                // Make up orthogonal to right
+                let dotRU = viewMat[0]*r1x + viewMat[1]*r1y + viewMat[2]*r1z;
+                let ux = r1x - dotRU*viewMat[0];
+                let uy = r1y - dotRU*viewMat[1];
+                let uz = r1z - dotRU*viewMat[2];
+                let lenU = Math.hypot(ux,uy,uz);
+                ux/=lenU; uy/=lenU; uz/=lenU;
+                viewMat[4]=ux; viewMat[5]=uy; viewMat[6]=uz;
+                // Forward = right x up
+                const fx = viewMat[1]*viewMat[6] - viewMat[2]*viewMat[5];
+                const fy = viewMat[2]*viewMat[4] - viewMat[0]*viewMat[6];
+                const fz = viewMat[0]*viewMat[5] - viewMat[1]*viewMat[4];
+                viewMat[8]=fx; viewMat[9]=fy; viewMat[10]=fz;
         }
     });
 
@@ -175,9 +234,21 @@ async function main() {
     device.queue.writeBuffer(simParamsBuffer, 0, simParamsData);
 
     const aspect = canvas.width / canvas.height;
-    const renderParamsData = new Float32Array([zoom, rotX, rotY, 0.0, near, far, cameraZ, aspect]);
+    const renderParamsData = new Float32Array(24); // 6 vec4 slots
+    function writeRenderParams(){
+        // params0
+        renderParamsData[0] = zoom;
+        // params1
+        renderParamsData[4] = near; renderParamsData[5] = far; renderParamsData[6] = cameraZ; renderParamsData[7] = aspect;
+        // view matrix rows (rotation only)
+        renderParamsData[8]  = viewMat[0]; renderParamsData[9]  = viewMat[1]; renderParamsData[10] = viewMat[2]; renderParamsData[11] = 0.0;
+        renderParamsData[12] = viewMat[4]; renderParamsData[13] = viewMat[5]; renderParamsData[14] = viewMat[6]; renderParamsData[15] = 0.0;
+        renderParamsData[16] = viewMat[8]; renderParamsData[17] = viewMat[9]; renderParamsData[18] = viewMat[10]; renderParamsData[19] = 0.0;
+        renderParamsData[20] = 0.0; renderParamsData[21] = 0.0; renderParamsData[22] = 0.0; renderParamsData[23] = 1.0;
+    }
+    writeRenderParams();
     const renderParamsBuffer = device.createBuffer({
-        size: 8 * 4, // 8 floats (32 bytes)
+        size: 24 * 4, // 24 floats (96 bytes)
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     device.queue.writeBuffer(renderParamsBuffer, 0, renderParamsData);
@@ -356,18 +427,40 @@ async function main() {
         prevFrameTime = currentTime;
 
         if (autoSpin && !dragging) {
-            rotY += 0.001;
+            // Apply a gentle continuous yaw around the current 'up' axis of the view matrix
+            const upX = viewMat[4], upY = viewMat[5], upZ = viewMat[6];
+            quat.setAxisAngle(tmpQuat, [upX, upY, upZ], 0.001);
+            mat4.fromQuat(tmpMat, tmpQuat);
+            mat4.multiply(viewMat, tmpMat, viewMat);
+            // Orthonormalize (same logic as mouse drag) to avoid drift
+            const r0x = viewMat[0], r0y = viewMat[1], r0z = viewMat[2];
+            const r1x = viewMat[4], r1y = viewMat[5], r1z = viewMat[6];
+            let len0 = Math.hypot(r0x,r0y,r0z);
+            viewMat[0]=r0x/len0; viewMat[1]=r0y/len0; viewMat[2]=r0z/len0;
+            let dotRU = viewMat[0]*r1x + viewMat[1]*r1y + viewMat[2]*r1z;
+            let ux = r1x - dotRU*viewMat[0];
+            let uy = r1y - dotRU*viewMat[1];
+            let uz = r1z - dotRU*viewMat[2];
+            let lenU = Math.hypot(ux,uy,uz);
+            ux/=lenU; uy/=lenU; uz/=lenU;
+            viewMat[4]=ux; viewMat[5]=uy; viewMat[6]=uz;
+            const fx = viewMat[1]*viewMat[6] - viewMat[2]*viewMat[5];
+            const fy = viewMat[2]*viewMat[4] - viewMat[0]*viewMat[6];
+            const fz = viewMat[0]*viewMat[5] - viewMat[1]*viewMat[4];
+            viewMat[8]=fx; viewMat[9]=fy; viewMat[10]=fz;
         }
 
         // Update camera params
-        renderParamsData[0] = zoom;
-        renderParamsData[1] = rotX;
-        renderParamsData[2] = rotY;
-        // near, far remain constant
-        renderParamsData[6] = cameraZ;
-        const aspect = canvas.width / canvas.height;
-        renderParamsData[7] = aspect;
-        device.queue.writeBuffer(renderParamsBuffer, 0, renderParamsData);
+    const aspect = canvas.width / canvas.height;
+    renderParamsData[5] = far; // unchanged but keep explicit if needed
+    renderParamsData[6] = cameraZ;
+    renderParamsData[7] = aspect;
+    renderParamsData[0] = zoom;
+    // update view rows
+    renderParamsData[8]  = viewMat[0]; renderParamsData[9]  = viewMat[1]; renderParamsData[10] = viewMat[2];
+    renderParamsData[12] = viewMat[4]; renderParamsData[13] = viewMat[5]; renderParamsData[14] = viewMat[6];
+    renderParamsData[16] = viewMat[8]; renderParamsData[17] = viewMat[9]; renderParamsData[18] = viewMat[10];
+    device.queue.writeBuffer(renderParamsBuffer, 0, renderParamsData);
 
         // Scale dt by frame time for consistent simulation speed
         const effectiveDt = params.dt * (frameTimeSec / (1/60)); // normalized to 60fps
