@@ -1,5 +1,6 @@
 import { setupFPS, setupControlPanel } from './controls.js';
 import { computeShaderModule, renderShaderModule } from './shader.js';
+import { mat4, vec3, quat } from './gl-matrix-lite.js';
 
 async function main() {
     const distanceIndicator = document.getElementById('distance-indicator');
@@ -8,24 +9,8 @@ async function main() {
     // Always use lighter blend mode
     let useLighterBlend = true;
 
-    // Camera controls
+    // Camera controls (using local minimal gl-matrix implementation)
         let zoom = 1;
-        // Acquire gl-matrix (supports both global UMD and optional ESM fallback)
-        let glx = window.glMatrix;
-        if (!glx || !glx.mat4) {
-            try {
-                const mod = await import('https://cdn.jsdelivr.net/npm/gl-matrix@3.4.3/esm/index.js');
-                glx = mod;
-            } catch (e) {
-                console.error('Failed to load gl-matrix module', e);
-            }
-        }
-        const mat4 = glx?.mat4;
-        const vec3 = glx?.vec3;
-        const quat = glx?.quat;
-        if (!mat4 || !vec3 || !quat) {
-            throw new Error('gl-matrix not available (mat4/vec3/quat missing)');
-        }
         // View rotation matrix (mat4) separate from simulation space
         const viewMat = mat4.create(); // identity
         const tmpMat = mat4.create();
