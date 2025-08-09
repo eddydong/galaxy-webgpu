@@ -1,0 +1,167 @@
+export function computeShaderModule(device){
+    return device.createShaderModule({
+        code: `
+            struct Particle {
+                pos: vec4<f32>,
+                vel: vec4<f32>,
+            };
+
+            struct Particles {
+                particles: array<Particle>,
+            };
+
+            @group(0) @binding(0) var<storage, read> particlesA: Particles;
+            @group(0) @binding(1) var<storage, read_write> particlesB: Particles;
+            
+            @group(0) @binding(2) var<uniform> sim_params: vec2<f32>; // G, dt
+            // Single global atomic max (stores bit pattern of largest positive distance)
+            @group(0) @binding(3) var<storage, read_write> globalMaxBits: atomic<u32>;
+
+            const softening = 0.01;
+
+            @compute @workgroup_size(64)
+            fn main(
+                @builtin(global_invocation_id) global_id: vec3<u32>
+            ) {
+                let idx = global_id.x;
+                let total = arrayLength(&particlesA.particles);
+                if (idx >= total) { return; }
+                var p = particlesA.particles[idx];
+                var acc = vec3<f32>(0.0, 0.0, 0.0);
+                for (var i = 0u; i < total; i = i + 1u) {
+                    if (i == idx) { continue; }
+                    let other = particlesA.particles[i];
+                    let r = other.pos.xyz - p.pos.xyz;
+                    let dist_sq = dot(r, r) + softening;
+                    let inv_dist = 1.0 / sqrt(dist_sq);
+                    let inv_dist_cube = inv_dist * inv_dist * inv_dist;
+                    acc = acc + sim_params.x * other.pos.w * r * inv_dist_cube;
+                }
+                let vel_xyz = p.vel.xyz + acc * sim_params.y;
+                let pos_xyz = p.pos.xyz + vel_xyz * sim_params.y;
+                p.pos = vec4<f32>(pos_xyz, p.pos.w);
+                p.vel = vec4<f32>(vel_xyz, p.vel.w);
+                particlesB.particles[idx] = p;
+                let dist = length(pos_xyz);
+                // Atomic max via CAS loop on bit pattern (dist is non-negative)
+                let candidate = bitcast<u32>(dist);
+                loop {
+                    let old = atomicLoad(&globalMaxBits);
+                    if (candidate <= old) { break; }
+                    let result = atomicCompareExchangeWeak(&globalMaxBits, old, candidate);
+                    if (result.exchanged) { break; }
+                }
+            }
+        `,
+    });
+}
+
+export function renderShaderModule(device){
+    return device.createShaderModule({
+        code: `
+            struct VSOutput {
+                @builtin(position) pos: vec4<f32>,
+                @location(0) uv: vec2<f32>,
+                @location(1) color: vec3<f32>,
+            };
+
+            // [zoom, rotX, rotY, unused, near, far, cameraZ, aspect]
+            struct RenderParams {
+                params0: vec4<f32>, // [zoom, rotX, rotY, unused]
+                params1: vec4<f32>, // [near, far, cameraZ, aspect]
+            }
+            @group(0) @binding(0) var<uniform> render_params: RenderParams;
+            fn get_zoom() -> f32 { return render_params.params0.x; }
+            fn get_rotX() -> f32 { return render_params.params0.y; }
+            fn get_rotY() -> f32 { return render_params.params0.z; }
+            fn get_near() -> f32 { return render_params.params1.x; }
+            fn get_far() -> f32 { return render_params.params1.y; }
+            fn get_cameraZ() -> f32 { return render_params.params1.z; }
+            fn get_aspect() -> f32 { return render_params.params1.w; }
+
+            fn rotateY(v: vec3<f32>, angle: f32) -> vec3<f32> {
+                let c = cos(angle);
+                let s = sin(angle);
+                return vec3<f32>(c*v.x + s*v.z, v.y, -s*v.x + c*v.z);
+            }
+            fn rotateX(v: vec3<f32>, angle: f32) -> vec3<f32> {
+                let c = cos(angle);
+                let s = sin(angle);
+                return vec3<f32>(v.x, c*v.y - s*v.z, s*v.y + c*v.z);
+            }
+
+            fn perspective_project(pos: vec3<f32>, near: f32, far: f32, cameraZ: f32) -> vec4<f32> {
+                // Simple perspective projection
+                let fovY = 1.0; // ~53 degrees
+                let aspect = get_aspect();
+                let f = 1.0 / tan(fovY * 0.5);
+                let nf = 1.0 / (near - far);
+                let x = pos.x * f / aspect;
+                let y = pos.y * f;
+                let z = (pos.z - cameraZ);
+                let projZ = (far + near) * nf * z + (2.0 * far * near) * nf;
+                return vec4<f32>(x, y, projZ, -z);
+            }
+
+            @vertex
+            fn vs_main(
+                @location(0) particle_pos: vec3<f32>, 
+                @location(2) quad_pos: vec2<f32>,
+                @location(3) particle_vel: vec4<f32>
+            ) -> VSOutput {
+                var out: VSOutput;
+                var pos = particle_pos;
+                // Rotate relative to screen axes: X first (vertical drag), then Y (horizontal drag)
+                pos = rotateX(pos, -get_rotX()); // vertical drag, screen X axis, reversed
+                pos = rotateY(pos, get_rotY()); // horizontal drag, screen Y axis
+                // Camera dolly zoom: we no longer scale world positions; zoom affects only cameraZ in JS
+                let near = get_near();
+                let far = get_far();
+                let cameraZ = get_cameraZ();
+                let particle_radius = particle_vel.w;
+                let worldPos = pos + vec3<f32>(quad_pos * particle_radius, 0.0);
+                out.pos = perspective_project(worldPos, near, far, cameraZ);
+                out.uv = quad_pos * 0.5 + 0.5;
+
+                // Calculate color based on velocity
+                let speed = length(particle_vel.xyz);
+                let speed_t = smoothstep(0.0, 20.0, speed); // normalize speed to 0-1
+
+                // Star color spectrum: red -> yellow -> green -> blue -> purple
+                var color: vec3<f32>;
+                if (speed_t < 0.15) { // Red to Yellow
+                    let t = speed_t / 0.15;
+                    color = mix(vec3<f32>(1.0, 0.2, 0.0), vec3<f32>(0.9, 0.8, 0.0), t);
+                } else if (speed_t < 0.3) { // Yellow to Green
+                    let t = (speed_t - 0.15) / 0.15;
+                    color = mix(vec3<f32>(0.9, 0.8, 0.0), vec3<f32>(0.0, 0.8, 0.4), t);
+                } else if (speed_t < 0.45) { // Green to Blue
+                    let t = (speed_t - 0.3) / 0.15;
+                    color = mix(vec3<f32>(0.0, 0.8, 0.4), vec3<f32>(0.1, 0.1, 1.0), t);
+                } else { // Blue to UV Purple
+                    let t = (speed_t - 0.9) / 0.05;
+                    color = mix(vec3<f32>(0.1, 0.1, 1.0), vec3<f32>(0.2, 0.1, 0.8), t);
+                }
+                out.color = color;
+
+                return out;
+            }
+
+            @fragment
+            fn fs_main(@location(0) uv: vec2<f32>, @location(1) color: vec3<f32>) -> @location(0) vec4<f32> {
+                let dist = distance(uv, vec2<f32>(0.5, 0.5));
+                var alpha: f32;
+                if (dist < 0.02) {
+                    alpha = 1.0;
+                } else if (dist < 0.025) {
+                    alpha = mix(1.0, 0.2, (dist - 0.02) / 0.005);
+                } else if (dist < 0.5) {
+                    alpha = mix(0.15, 0.0, (dist - 0.025) / 0.475);
+                } else {
+                    alpha = 0.0;
+                }
+                return vec4<f32>(color, alpha);
+            }
+        `
+    });
+}

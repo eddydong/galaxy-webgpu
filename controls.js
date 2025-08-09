@@ -1,11 +1,29 @@
 // controls.js
+
+// Handles UI elements like FPS counter and WebGPU warning
+export function setupFPS() {
+    // FPS Counter
+    let fpsCounter = document.getElementById('fps-counter');
+    if (!fpsCounter) {
+        fpsCounter = document.createElement('div');
+        fpsCounter.id = 'fps-counter';
+        fpsCounter.className = 'fps-counter';
+        document.body.appendChild(fpsCounter);
+    } else {
+        // Ensure it is visible and styled
+        fpsCounter.className = 'fps-counter';
+        fpsCounter.style.display = '';
+    }
+    // WebGPU warning will be handled in main.js as before
+}
+
 // Handles the control panel logic and events
 export function setupControlPanel({ params, device, simParamsBuffer, particleBuffers, reinitParticles, toggleAutoSpin }) {
     const controlPanel = document.createElement('div');
     controlPanel.className = 'control-panel';
     controlPanel.innerHTML = `
       <label class="control-label">
-        <span>Gravity: <span id="g-value">25</span></span>
+        <span>Gravity: <span id="g-value">30</span></span>
         <input type="range" id="g-slider" min="1" max="100" step="1" value="30">
       </label>
       <label class="control-label">
@@ -37,7 +55,7 @@ export function setupControlPanel({ params, device, simParamsBuffer, particleBuf
 
     gSlider.addEventListener('input', () => {
         const gSliderValue = parseInt(gSlider.value);
-        params.G = gSliderValue * 0.0000001;
+        params.G = gSliderValue * 1e-11;
         gValue.textContent = gSliderValue;
         device.queue.writeBuffer(simParamsBuffer, 0, new Float32Array([params.G, params.dt]));
     });
@@ -61,4 +79,27 @@ export function setupControlPanel({ params, device, simParamsBuffer, particleBuf
     autoSpinCheckbox.addEventListener('change', () => {
         toggleAutoSpin(autoSpinCheckbox.checked);
     });
+}
+
+export function showAlert(message) {
+	let notice = document.getElementById('alert-notice');
+	if (!notice) {
+		notice = document.createElement('div');
+		notice.id = 'alert-notice';
+		Object.assign(notice.style, {
+			position: 'fixed',
+			top: '50%',
+			left: '50%',
+			transform: 'translate(-50%, -50%)',
+			background: 'rgba(0,0,0,0.85)',
+			color: 'white',
+			padding: '32px 48px',
+			borderRadius: '16px',
+			fontSize: '1.3em',
+			fontFamily: 'sans-serif',
+			zIndex: '100'
+		});
+		document.body.appendChild(notice);
+	}
+	notice.textContent = message;
 }

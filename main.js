@@ -1,7 +1,8 @@
-import { setupControlPanel } from './controls.js';
-import { setupUI } from './ui.js';
+import { setupFPS, setupControlPanel } from './controls.js';
+import { computeShaderModule, renderShaderModule } from './shader.js';
 
 async function main() {
+    const distanceIndicator = document.getElementById('distance-indicator');
     const canvas = document.getElementById('webgpu-canvas');
 
     // Always use lighter blend mode
@@ -11,27 +12,28 @@ async function main() {
     let zoom = 1; // slightly zoomed out
     let rotX = 0; // tilt for better perspective
     let rotY = 0; // rotate around Y axis for better view
+    const near = 0.001;
+    const far = 30.0;
+    let cameraZ = 2.0;
+
     let dragging = false;
     let lastMouseX = 0;
     let lastMouseY = 0;
 
     const params = {
         numParticles: 5000,
-        G: 0.0000025, // internal value (0.3 * 0.000001)
+        G: 30 * 1e-11, // internal value (0.3 * 0.000001)
         dt: 0.0003, // internal value (30 * 0.00001)
     };    
 
-    // [zoom, rotX, rotY, unused, near, far, cameraZ, aspect]
-    const near = 0.01;
-    const far = 15.0;
-    let cameraZ = 2.0;
-
     canvas.addEventListener('wheel', (e) => {
         e.preventDefault();
-        zoom *= Math.exp(-e.deltaY * 0.001); // normal zoom direction
-        zoom = Math.max(0.2, Math.min(zoom, 10));
-        // Keep the center at the screen center by adjusting cameraZ
-        cameraZ = 2.0 / zoom;
+        // Dolly the camera instead of scaling particle positions
+        // Negative deltaY (wheel up) moves camera closer
+        const factor = Math.exp(e.deltaY * 0.001);
+        cameraZ = Math.min(20.0, Math.max(0.01, cameraZ * factor));
+        // Keep a derived zoom value for UI/other effects if needed (optional smoothing)
+        zoom = 2.0 / cameraZ; // maintain inverse relation only for any UI reads; shader no longer scales positions
     });
 
     canvas.addEventListener('mousedown', (e) => {
@@ -86,6 +88,19 @@ async function main() {
     }
 
     const device = await adapter.requestDevice();
+    // Buffer for max radius output (one float per workgroup)
+    let numWorkgroups = Math.ceil(params.numParticles / 64);
+    // Single float (atomic u32 bits) buffer for global max distance
+    let maxRadiusBuffer = device.createBuffer({
+        size: 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    let maxRadiusReadBuffer = device.createBuffer({
+        size: 4,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    let maxReadPending = false;
+    let lastMaxDist = 0;
     const context = canvas.getContext('webgpu');
     const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
     context.configure({
@@ -94,7 +109,7 @@ async function main() {
     });
 
     function createParticleData(numParticles) {
-        const data = new Float32Array(numParticles * 12);
+        const data = new Float32Array(numParticles * 8);
         for (let i = 0; i < numParticles; i++) {
             // Random position in a ball (uniformly distributed in a sphere)
             let u = Math.random();
@@ -102,35 +117,35 @@ async function main() {
             let w = Math.random();
             let theta = 2 * Math.PI * u;
             let phi = Math.acos(2 * v - 1);
-            let r = Math.cbrt(w) * 0.9; // radius, cube root for uniform sphere
+            let r = Math.cbrt(w) * 1.0; // radius, cube root for uniform sphere
             let x = r * Math.sin(phi) * Math.cos(theta);
             let y = r * Math.sin(phi) * Math.sin(theta);
             let z = r * Math.cos(phi);
 
             // Assign random mass, skewed towards lower values
-            const mass = 0.01 + Math.pow(Math.random(), 3) * 9999.9;
+            // Mass: mostly low, very rarely high
+            const mass = 0.01 + Math.pow(Math.random()*0.99, 12) * 99999999.9;
+            // Radius based on mass (mass is proportional to volume, so radius is proportional to cbrt(mass))
+            const radius = 0.01 + Math.cbrt(mass / 100000000.0) * 0.04;
+
+            // The data for each particle is stored as 8 floats (32 bytes),
+            // matching the 'Particle' struct in the compute shader.
+            // The layout is:
+            // - floats 0-3: position (x, y, z) and mass (w)
+            // - floats 4-7: velocity (vx, vy, vz) and radius (w)
 
             // Position
-            data[i * 12 + 0] = x;
-            data[i * 12 + 1] = y;
-            data[i * 12 + 2] = z;
-            data[i * 12 + 3] = mass;
+            data[i * 8 + 0] = x;
+            data[i * 8 + 1] = y;
+            data[i * 8 + 2] = z;
+            data[i * 8 + 3] = mass;
 
             // Initial velocity: zero
-            data[i * 12 + 4] = 0;
-            data[i * 12 + 5] = 0;
-            data[i * 12 + 6] = 0;
+            data[i * 8 + 4] = 0;
+            data[i * 8 + 5] = 0;
+            data[i * 8 + 6] = 0;
             
-            // Radius based on mass (mass is proportional to volume, so radius is proportional to cbrt(mass))
-            const radius = 0.01 + Math.cbrt(mass / 10000.0) * 0.04;
-            data[i * 12 + 7] = radius;
-
-            // Color is now calculated in the shader based on velocity.
-            // These slots are unused but need to be present for stride.
-            data[i * 12 + 8] = 0;
-            data[i * 12 + 9] = 0;
-            data[i * 12 + 10] = 0;
-            data[i * 12 + 11] = 0; // unused
+            data[i * 8 + 7] = radius;
         }
         return data;
     }
@@ -167,162 +182,8 @@ async function main() {
     });
     device.queue.writeBuffer(renderParamsBuffer, 0, renderParamsData);
 
-    const computeShaderModule = device.createShaderModule({
-        code: `
-            struct Particle {
-                pos: vec4<f32>,
-                vel: vec4<f32>,
-                color: vec4<f32>,
-            };
-
-            struct Particles {
-                particles: array<Particle>,
-            };
-
-            @group(0) @binding(0) var<storage, read> particlesA: Particles;
-            @group(0) @binding(1) var<storage, read_write> particlesB: Particles;
-            
-            @group(0) @binding(2) var<uniform> sim_params: vec2<f32>; // G, dt
-
-            const softening = 0.01;
-
-            @compute @workgroup_size(64)
-            fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
-                let idx = global_id.x;
-                var p = particlesA.particles[idx];
-                var acc = vec3<f32>(0.0, 0.0, 0.0);
-
-                for (var i = 0u; i < arrayLength(&particlesA.particles); i = i + 1u) {
-                    if (i == idx) {
-                        continue;
-                    }
-                    let other = particlesA.particles[i];
-                    let r = other.pos.xyz - p.pos.xyz;
-                    let dist_sq = dot(r, r) + softening;
-                    let inv_dist = 1.0 / sqrt(dist_sq);
-                    let inv_dist_cube = inv_dist * inv_dist * inv_dist;
-                    acc = acc + sim_params.x * other.pos.w * r * inv_dist_cube;
-                }
-                
-                let vel_xyz = p.vel.xyz + acc * sim_params.y;
-                let pos_xyz = p.pos.xyz + vel_xyz * sim_params.y;
-                
-                p.pos = vec4<f32>(pos_xyz, p.pos.w);
-                p.vel = vec4<f32>(vel_xyz, p.vel.w);
-
-                particlesB.particles[idx] = p;
-            }
-        `,
-    });
-
-    const renderShaderModule = device.createShaderModule({
-        code: `
-            struct VSOutput {
-                @builtin(position) pos: vec4<f32>,
-                @location(0) uv: vec2<f32>,
-                @location(1) color: vec3<f32>,
-            };
-
-            // [zoom, rotX, rotY, unused, near, far, cameraZ, aspect]
-            struct RenderParams {
-                params0: vec4<f32>, // [zoom, rotX, rotY, unused]
-                params1: vec4<f32>, // [near, far, cameraZ, aspect]
-            }
-            @group(0) @binding(0) var<uniform> render_params: RenderParams;
-            fn get_zoom() -> f32 { return render_params.params0.x; }
-            fn get_rotX() -> f32 { return render_params.params0.y; }
-            fn get_rotY() -> f32 { return render_params.params0.z; }
-            fn get_near() -> f32 { return render_params.params1.x; }
-            fn get_far() -> f32 { return render_params.params1.y; }
-            fn get_cameraZ() -> f32 { return render_params.params1.z; }
-            fn get_aspect() -> f32 { return render_params.params1.w; }
-
-            fn rotateY(v: vec3<f32>, angle: f32) -> vec3<f32> {
-                let c = cos(angle);
-                let s = sin(angle);
-                return vec3<f32>(c*v.x + s*v.z, v.y, -s*v.x + c*v.z);
-            }
-            fn rotateX(v: vec3<f32>, angle: f32) -> vec3<f32> {
-                let c = cos(angle);
-                let s = sin(angle);
-                return vec3<f32>(v.x, c*v.y - s*v.z, s*v.y + c*v.z);
-            }
-
-            fn perspective_project(pos: vec3<f32>, near: f32, far: f32, cameraZ: f32) -> vec4<f32> {
-                // Simple perspective projection
-                let fovY = 1.0; // ~53 degrees
-                let aspect = get_aspect();
-                let f = 1.0 / tan(fovY * 0.5);
-                let nf = 1.0 / (near - far);
-                let x = pos.x * f / aspect;
-                let y = pos.y * f;
-                let z = (pos.z - cameraZ);
-                let projZ = (far + near) * nf * z + (2.0 * far * near) * nf;
-                return vec4<f32>(x, y, projZ, -z);
-            }
-
-            @vertex
-            fn vs_main(
-                @location(0) particle_pos: vec3<f32>, 
-                @location(1) particle_color_unused: vec3<f32>,
-                @location(2) quad_pos: vec2<f32>,
-                @location(3) particle_vel: vec4<f32>
-            ) -> VSOutput {
-                var out: VSOutput;
-                var pos = particle_pos;
-                // Rotate relative to screen axes: X first (vertical drag), then Y (horizontal drag)
-                pos = rotateX(pos, -get_rotX()); // vertical drag, screen X axis, reversed
-                pos = rotateY(pos, get_rotY()); // horizontal drag, screen Y axis
-                pos *= get_zoom(); // zoom
-                let near = get_near();
-                let far = get_far();
-                let cameraZ = get_cameraZ();
-                let particle_radius = particle_vel.w;
-                let worldPos = pos + vec3<f32>(quad_pos * particle_radius, 0.0);
-                out.pos = perspective_project(worldPos, near, far, cameraZ);
-                out.uv = quad_pos * 0.5 + 0.5;
-
-                // Calculate color based on velocity
-                let speed = length(particle_vel.xyz);
-                let speed_t = smoothstep(0.0, 20.0, speed); // normalize speed to 0-1
-
-                // Star color spectrum: red -> yellow -> green -> blue -> purple
-                var color: vec3<f32>;
-                if (speed_t < 0.15) { // Red to Yellow
-                    let t = speed_t / 0.15;
-                    color = mix(vec3<f32>(1.0, 0.2, 0.0), vec3<f32>(1.0, 1.0, 0.0), t);
-                } else if (speed_t < 0.3) { // Yellow to Green
-                    let t = (speed_t - 0.15) / 0.15;
-                    color = mix(vec3<f32>(1.0, 1.0, 0.0), vec3<f32>(0.0, 1.0, 0.5), t);
-                } else if (speed_t < 0.95) { // Green to Blue
-                    let t = (speed_t - 0.3) / 0.65;
-                    color = mix(vec3<f32>(0.0, 1.0, 0.5), vec3<f32>(0.1, 0.1, 0.8), t);
-                } else { // Blue to UV Purple
-                    let t = (speed_t - 0.9) / 0.05;
-                    color = mix(vec3<f32>(0.1, 0.1, 0.8), vec3<f32>(0.15, 0.1, 0.7), t);
-                }
-                out.color = color;
-
-                return out;
-            }
-
-            @fragment
-            fn fs_main(@location(0) uv: vec2<f32>, @location(1) color: vec3<f32>) -> @location(0) vec4<f32> {
-                let dist = distance(uv, vec2<f32>(0.5, 0.5));
-                var alpha: f32;
-                if (dist < 0.04) {
-                    alpha = 0.9;
-                } else if (dist < 0.06) {
-                    alpha = mix(0.9, 0.17, (dist - 0.04) / 0.02);
-                } else if (dist < 0.5) {
-                    alpha = mix(0.17, 0.0, (dist - 0.06) / 0.44);
-                } else {
-                    alpha = 0.0;
-                }
-                return vec4<f32>(color, alpha);
-            }
-        `
-    });
+    const computeModule = computeShaderModule(device);
+    const renderModule = renderShaderModule(device);
 
     // Create quad vertex buffer for particle rendering
     const quadVertexBuffer = device.createBuffer({
@@ -341,7 +202,7 @@ async function main() {
     const computePipeline = device.createComputePipeline({
         layout: 'auto',
         compute: {
-            module: computeShaderModule,
+            module: computeModule,
             entryPoint: 'main',
         },
     });
@@ -351,21 +212,16 @@ async function main() {
         renderPipeline = device.createRenderPipeline({
             layout: 'auto',
             vertex: {
-                module: renderShaderModule,
+                module: renderModule,
                 entryPoint: 'vs_main',
                 buffers: [
                     {
-                        arrayStride: 48, // 12 floats * 4 bytes
+                        arrayStride: 32, // 8 floats * 4 bytes
                         stepMode: 'instance',
                         attributes: [
                             { // position
                                 shaderLocation: 0,
                                 offset: 0,
-                                format: 'float32x3',
-                            },
-                            { // color
-                                shaderLocation: 1,
-                                offset: 32, // after pos and vel
                                 format: 'float32x3',
                             },
                             { // velocity
@@ -387,7 +243,7 @@ async function main() {
                 ],
             },
             fragment: {
-                module: renderShaderModule,
+                module: renderModule,
                 entryPoint: 'fs_main',
                 targets: [{
                     format: canvasFormat,
@@ -435,7 +291,7 @@ async function main() {
         autoSpin = enabled;
     }
 
-    setupUI();
+    setupFPS();
     setupControlPanel({
         params,
         device,
@@ -457,18 +313,36 @@ async function main() {
             });
             new Float32Array(particleBuffers[0].getMappedRange()).set(newParticleData);
             particleBuffers[0].unmap();
+            // Recreate max radius buffers (num particles may have changed)
+            if (maxReadPending) {
+                try { maxRadiusReadBuffer.unmap(); } catch(e){}
+                maxReadPending = false;
+            }
+            maxRadiusBuffer.destroy && maxRadiusBuffer.destroy();
+            maxRadiusReadBuffer.destroy && maxRadiusReadBuffer.destroy();
+            numWorkgroups = Math.ceil(params.numParticles / 64);
+            maxRadiusBuffer = device.createBuffer({
+                size: 4,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+            });
+            maxRadiusReadBuffer = device.createBuffer({
+                size: 4,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            });
+            lastMaxDist = 0;
             t = 0;
         },
         toggleAutoSpin
     });
 
-    const fpsCounter = document.getElementById('fps-counter'); // created by setupUI
+    const fpsCounter = document.getElementById('fps-counter'); // created for setupFPS
     let lastTime = performance.now();
     let frameCount = 0;
 
     let t = 0;
     let prevFrameTime = performance.now();
     function frame() {
+    // (Readback moved to after compute submission)
         const currentTime = performance.now();
         frameCount++;
         if (currentTime - lastTime >= 1000) {
@@ -502,7 +376,9 @@ async function main() {
         const commandEncoder = device.createCommandEncoder();
 
         // Compute pass
-        const computePass = commandEncoder.beginComputePass();
+    // Reset global max (atomic u32) to 0 before compute
+    device.queue.writeBuffer(maxRadiusBuffer, 0, new Uint32Array([0]));
+    const computePass = commandEncoder.beginComputePass();
         computePass.setPipeline(computePipeline);
         const computeBindGroup = device.createBindGroup({
             layout: computePipeline.getBindGroupLayout(0),
@@ -510,11 +386,19 @@ async function main() {
                 { binding: 0, resource: { buffer: particleBuffers[t % 2] } },
                 { binding: 1, resource: { buffer: particleBuffers[(t + 1) % 2] } },
                 { binding: 2, resource: { buffer: simParamsBuffer } },
+                { binding: 3, resource: { buffer: maxRadiusBuffer } },
             ],
         });
         computePass.setBindGroup(0, computeBindGroup);
-        computePass.dispatchWorkgroups(Math.ceil(params.numParticles / 64));
+        computePass.dispatchWorkgroups(numWorkgroups);
         computePass.end();
+
+        // Schedule copy of per-workgroup maxima to staging buffer every 10 frames
+        const doRead = (frameCount % 10) === 0 && !maxReadPending;
+        if (doRead) {
+            commandEncoder.copyBufferToBuffer(maxRadiusBuffer, 0, maxRadiusReadBuffer, 0, 4);
+            maxReadPending = true;
+        }
 
         // Render pass
         const textureView = context.getCurrentTexture().createView();
@@ -534,6 +418,23 @@ async function main() {
         renderPass.end();
 
         device.queue.submit([commandEncoder.finish()]);
+
+        // Map and read after GPU work submission (non-blocking)
+        if (doRead) {
+                maxRadiusReadBuffer.mapAsync(GPUMapMode.READ).then(() => {
+                    const arr = new Uint32Array(maxRadiusReadBuffer.getMappedRange());
+                    const u32 = arr[0];
+                    lastMaxDist = new Float32Array(new Uint32Array([u32]).buffer)[0];
+                    if (distanceIndicator) {
+                        distanceIndicator.textContent = `R: ${lastMaxDist.toExponential(1)}`;
+                    }
+                    maxRadiusReadBuffer.unmap();
+                    maxReadPending = false;
+                }).catch(() => { maxReadPending = false; });
+        } else if (distanceIndicator && frameCount % 10 !== 0) {
+            // Keep indicator refreshed even if not reading this frame
+            distanceIndicator.textContent = `R: ${lastMaxDist.toExponential(1)}`;
+        }
         t++;
         requestAnimationFrame(frame);
     }
@@ -541,4 +442,4 @@ async function main() {
     requestAnimationFrame(frame);
 }
 
-main();
+main()
