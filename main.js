@@ -2,6 +2,8 @@ import { setupFPS, setupControlPanel } from './controls.js';
 import { computeShaderModule, renderShaderModule } from './shader.js';
 import { mat4, vec3, quat } from './gl-matrix-lite.js';
 
+//test
+
 async function main() {
     const distanceIndicator = document.getElementById('distance-indicator');
     const canvas = document.getElementById('webgpu-canvas');
