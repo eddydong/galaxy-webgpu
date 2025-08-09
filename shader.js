@@ -108,6 +108,7 @@ export function renderShaderModule(device){
             };
             @group(0) @binding(0) var<uniform> render_params: RenderParams;
             fn get_zoom() -> f32 { return render_params.params0.x; }
+            fn get_viewport_height() -> f32 { return render_params.params0.y; }
             fn get_near() -> f32 { return render_params.params1.x; }
             fn get_far() -> f32 { return render_params.params1.y; }
             fn get_cameraZ() -> f32 { return render_params.params1.z; }
@@ -159,10 +160,34 @@ export function renderShaderModule(device){
                 let near = get_near();
                 let far = get_far();
                 let cameraZ = get_cameraZ();
-                let particle_radius = particle_vel.w;
-                let worldPos = pos + vec3<f32>(quad_pos * particle_radius, 0.0);
+                let base_radius = particle_vel.w;
+                // Depth relative to camera (camera looks down -Z after view rotation)
+                let depth = cameraZ - pos.z; // positive in front
+                let safeDepth = max(depth, 0.001);
+                // Mirror perspective constants (must match perspective_project)
+                let fovY = 1.0;
+                let f = 1.0 / tan(fovY * 0.5);
+                // Projected NDC radius then pixel radius
+                let r_ndc = (base_radius * f) / safeDepth;
+                let pixelRadius = r_ndc * (get_viewport_height() * 0.5);
+                // LOD & clamp
+                var usePoint = pixelRadius < 1.5;
+                // Size tuning: reduce maximum on-screen radius to avoid oversized bright blobs
+                let clampedPixelRadius = min(pixelRadius, 16.0); // was 24.0
+                let scaled_ndc = clampedPixelRadius / (get_viewport_height() * 0.5);
+                let scaled_world = scaled_ndc * safeDepth / f * 0.75; // shrink overall size (0.75 factor)
+                var worldPos: vec3<f32>;
+                if (usePoint) {
+                    worldPos = pos; // collapse quad
+                } else {
+                    worldPos = pos + vec3<f32>(quad_pos * scaled_world, 0.0);
+                }
                 out.pos = perspective_project(worldPos, near, far, cameraZ);
-                out.uv = quad_pos * 0.5 + 0.5;
+                if (usePoint) {
+                    out.uv = vec2<f32>(0.5, 0.5);
+                } else {
+                    out.uv = quad_pos * 0.5 + 0.5;
+                }
 
                 // Calculate color based on velocity
                 let speed = length(particle_vel.xyz);
@@ -191,17 +216,18 @@ export function renderShaderModule(device){
             @fragment
             fn fs_main(@location(0) uv: vec2<f32>, @location(1) color: vec3<f32>) -> @location(0) vec4<f32> {
                 let dist = distance(uv, vec2<f32>(0.5, 0.5));
+                if (dist > 0.5) { discard; } // early reject to cut overdraw
+                // Simplified falloff: strong core, linear fade
                 var alpha: f32;
-                if (dist < 0.02) {
+                if (dist < 0.04) {
                     alpha = 1.0;
-                } else if (dist < 0.025) {
-                    alpha = mix(1.0, 0.2, (dist - 0.02) / 0.005);
-                } else if (dist < 0.5) {
-                    alpha = mix(0.15, 0.0, (dist - 0.025) / 0.475);
                 } else {
-                    alpha = 0.0;
+                    // Faster fade (end at 0.4 instead of 0.5 effective) for less bloom stacking
+                    alpha = max(0.0, 1.0 - (dist - 0.04) / 0.36);
                 }
-                return vec4<f32>(color, alpha);
+                // Dim overall brightness to reduce additive blowout
+                let finalColor = color * 0.65;
+                return vec4<f32>(finalColor, alpha * 0.85); // slightly reduce alpha too
             }
         `
     });

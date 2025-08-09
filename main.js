@@ -224,8 +224,9 @@ async function main() {
     const aspect = canvas.width / canvas.height;
     const renderParamsData = new Float32Array(24); // 6 vec4 slots
     function writeRenderParams(){
-        // params0
-        renderParamsData[0] = zoom;
+    // params0 (x: zoom, y: viewport height for LOD, z/w unused for now)
+    renderParamsData[0] = zoom;
+    renderParamsData[1] = canvas.height; // in physical pixels (DPR applied earlier in canvas sizing)
         // params1
         renderParamsData[4] = near; renderParamsData[5] = far; renderParamsData[6] = cameraZ; renderParamsData[7] = aspect;
         // view matrix rows (rotation only)
@@ -496,6 +497,7 @@ async function main() {
     renderParamsData[6] = cameraZ;
     renderParamsData[7] = aspect;
     renderParamsData[0] = zoom;
+    renderParamsData[1] = canvas.height; // keep viewport height current for LOD
     // update view rows
     renderParamsData[8]  = viewMat[0]; renderParamsData[9]  = viewMat[1]; renderParamsData[10] = viewMat[2];
     renderParamsData[12] = viewMat[4]; renderParamsData[13] = viewMat[5]; renderParamsData[14] = viewMat[6];
