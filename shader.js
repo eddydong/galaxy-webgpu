@@ -1,4 +1,4 @@
-export function computeShaderModule(device){
+export function computeShaderModule(device, workgroupSize = 64){
     return device.createShaderModule({
         code: `
             struct Particle {
@@ -19,37 +19,65 @@ export function computeShaderModule(device){
 
             const softening = 0.01;
 
-            @compute @workgroup_size(64)
+            // Shared-memory tiling: reduces global memory reads from O(N) per particle to O(N / tileSize)
+            var<workgroup> tilePosMass: array<vec4<f32>, ${workgroupSize}>; // pos.xyz, mass
+
+            @compute @workgroup_size(${/* embed chosen size */ ''}${workgroupSize})
             fn main(
-                @builtin(global_invocation_id) global_id: vec3<u32>
+                @builtin(global_invocation_id) global_id: vec3<u32>,
+                @builtin(local_invocation_id) local_id: vec3<u32>
             ) {
                 let idx = global_id.x;
                 let total = arrayLength(&particlesA.particles);
-                if (idx >= total) { return; }
-                var p = particlesA.particles[idx];
+                let isActive = idx < total;
+                // Initialize current particle data only if active; provide fallbacks otherwise
+                var p: Particle;
+                if (isActive) { p = particlesA.particles[idx]; }
                 var acc = vec3<f32>(0.0, 0.0, 0.0);
-                for (var i = 0u; i < total; i = i + 1u) {
-                    if (i == idx) { continue; }
-                    let other = particlesA.particles[i];
-                    let r = other.pos.xyz - p.pos.xyz;
-                    let dist_sq = dot(r, r) + softening;
-                    let inv_dist = 1.0 / sqrt(dist_sq);
-                    let inv_dist_cube = inv_dist * inv_dist * inv_dist;
-                    acc = acc + sim_params.x * other.pos.w * r * inv_dist_cube;
-                }
-                let vel_xyz = p.vel.xyz + acc * sim_params.y;
-                let pos_xyz = p.pos.xyz + vel_xyz * sim_params.y;
-                p.pos = vec4<f32>(pos_xyz, p.pos.w);
-                p.vel = vec4<f32>(vel_xyz, p.vel.w);
-                particlesB.particles[idx] = p;
-                let dist = length(pos_xyz);
-                // Atomic max via CAS loop on bit pattern (dist is non-negative)
-                let candidate = bitcast<u32>(dist);
+                var selfPos: vec3<f32>;
+                if (isActive) { selfPos = p.pos.xyz; } else { selfPos = vec3<f32>(0.0,0.0,0.0); }
+                // Iterate over tiles uniformly for all threads (no early return)
+                var base: u32 = 0u;
                 loop {
-                    let old = atomicLoad(&globalMaxBits);
-                    if (candidate <= old) { break; }
-                    let result = atomicCompareExchangeWeak(&globalMaxBits, old, candidate);
-                    if (result.exchanged) { break; }
+                    if (base >= total) { break; }
+                    let loadIndex = base + local_id.x;
+                    if (loadIndex < total) {
+                        tilePosMass[local_id.x] = particlesA.particles[loadIndex].pos; // pos.w = mass
+                    } else {
+                        tilePosMass[local_id.x] = vec4<f32>(0.0);
+                    }
+                    workgroupBarrier();
+                    let limit = min(u32(${workgroupSize}), total - base);
+                    if (isActive) {
+                        for (var j: u32 = 0u; j < limit; j = j + 1u) {
+                            let globalJ = base + j;
+                            if (globalJ == idx) { continue; }
+                            let otherPosMass = tilePosMass[j];
+                            let r = otherPosMass.xyz - selfPos;
+                            let dist_sq = dot(r, r) + softening;
+                            let inv_dist = inverseSqrt(dist_sq);
+                            let inv_dist2 = inv_dist * inv_dist;
+                            let inv_dist3 = inv_dist2 * inv_dist;
+                            acc = acc + sim_params.x * otherPosMass.w * r * inv_dist3;
+                        }
+                    }
+                    workgroupBarrier();
+                    base = base + u32(${workgroupSize});
+                }
+                if (isActive) {
+                    let vel_xyz = p.vel.xyz + acc * sim_params.y;
+                    let pos_xyz = selfPos + vel_xyz * sim_params.y;
+                    p.pos = vec4<f32>(pos_xyz, p.pos.w);
+                    p.vel = vec4<f32>(vel_xyz, p.vel.w);
+                    particlesB.particles[idx] = p;
+                    let dist = length(pos_xyz);
+                    let candidate = bitcast<u32>(dist);
+                    loop {
+                        let old = atomicLoad(&globalMaxBits);
+                        if (candidate <= old) { break; }
+                        let result = atomicCompareExchangeWeak(&globalMaxBits, old, candidate);
+                        if (result.exchanged) { break; }
+                    }
                 }
             }
         `,

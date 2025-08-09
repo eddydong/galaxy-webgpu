@@ -27,7 +27,7 @@ async function main() {
     let lastMouseY = 0;
 
     const params = {
-        numParticles: 5000,
+        numParticles: 30000,
         G: 30 * 1e-11, // internal value (0.3 * 0.000001)
         dt: 0.0003, // internal value (30 * 0.00001)
     };    
@@ -132,8 +132,10 @@ async function main() {
     }
 
     const device = await adapter.requestDevice();
+    // Choose a larger workgroup size (safe upper bound 256) to reduce dispatch count
+    const WORKGROUP_SIZE = Math.min(256, device.limits?.maxComputeWorkgroupSizeX || 256);
     // Buffer for max radius output (one float per workgroup)
-    let numWorkgroups = Math.ceil(params.numParticles / 64);
+    let numWorkgroups = Math.ceil(params.numParticles / WORKGROUP_SIZE);
     // Single float (atomic u32 bits) buffer for global max distance
     let maxRadiusBuffer = device.createBuffer({
         size: 4,
@@ -145,6 +147,7 @@ async function main() {
     });
     let maxReadPending = false;
     let lastMaxDist = 0;
+    const READBACK_INTERVAL = 30; // frames between max-radius readbacks (was 10)
     const context = canvas.getContext('webgpu');
     const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
     context.configure({
@@ -238,7 +241,7 @@ async function main() {
     });
     device.queue.writeBuffer(renderParamsBuffer, 0, renderParamsData);
 
-    const computeModule = computeShaderModule(device);
+    const computeModule = computeShaderModule(device, WORKGROUP_SIZE);
     const renderModule = renderShaderModule(device);
 
     // Create quad vertex buffer for particle rendering
@@ -262,6 +265,27 @@ async function main() {
             entryPoint: 'main',
         },
     });
+    // Pre-create ping-pong bind groups (we'll recreate if particle buffers change)
+    let computeBindGroups = [
+        device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: particleBuffers[0] } },
+                { binding: 1, resource: { buffer: particleBuffers[1] } },
+                { binding: 2, resource: { buffer: simParamsBuffer } },
+                { binding: 3, resource: { buffer: maxRadiusBuffer } },
+            ],
+        }),
+        device.createBindGroup({
+            layout: computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: particleBuffers[1] } },
+                { binding: 1, resource: { buffer: particleBuffers[0] } },
+                { binding: 2, resource: { buffer: simParamsBuffer } },
+                { binding: 3, resource: { buffer: maxRadiusBuffer } },
+            ],
+        })
+    ];
 
     let renderPipeline, renderBindGroup;
     function recreateRenderPipeline() {
@@ -376,7 +400,7 @@ async function main() {
             }
             maxRadiusBuffer.destroy && maxRadiusBuffer.destroy();
             maxRadiusReadBuffer.destroy && maxRadiusReadBuffer.destroy();
-            numWorkgroups = Math.ceil(params.numParticles / 64);
+            numWorkgroups = Math.ceil(params.numParticles / WORKGROUP_SIZE);
             maxRadiusBuffer = device.createBuffer({
                 size: 4,
                 usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
@@ -385,6 +409,27 @@ async function main() {
                 size: 4,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
             });
+            // Recreate compute bind groups with new buffers
+            computeBindGroups = [
+                device.createBindGroup({
+                    layout: computePipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: particleBuffers[0] } },
+                        { binding: 1, resource: { buffer: particleBuffers[1] } },
+                        { binding: 2, resource: { buffer: simParamsBuffer } },
+                        { binding: 3, resource: { buffer: maxRadiusBuffer } },
+                    ],
+                }),
+                device.createBindGroup({
+                    layout: computePipeline.getBindGroupLayout(0),
+                    entries: [
+                        { binding: 0, resource: { buffer: particleBuffers[1] } },
+                        { binding: 1, resource: { buffer: particleBuffers[0] } },
+                        { binding: 2, resource: { buffer: simParamsBuffer } },
+                        { binding: 3, resource: { buffer: maxRadiusBuffer } },
+                    ],
+                })
+            ];
             lastMaxDist = 0;
             t = 0;
         },
@@ -394,11 +439,16 @@ async function main() {
     const fpsCounter = document.getElementById('fps-counter'); // created for setupFPS
     let lastTime = performance.now();
     let frameCount = 0;
+    // Temporal decoupling: fixed physics rate (60Hz) while rendering every frame
+    const TARGET_PHYSICS_HZ = 60;
+    const PHYSICS_STEP = 1 / TARGET_PHYSICS_HZ; // seconds
+    let physicsAccumulator = 0;
+    let physicsFrameCount = 0; // counts only executed physics steps
 
     let t = 0;
     let prevFrameTime = performance.now();
     function frame() {
-    // (Readback moved to after compute submission)
+        // (Readback moved to after compute submission)
         const currentTime = performance.now();
         frameCount++;
         if (currentTime - lastTime >= 1000) {
@@ -406,10 +456,11 @@ async function main() {
             frameCount = 0;
             lastTime = currentTime;
         }
-
-        // Calculate frame time in seconds, and clamp to avoid large jumps
-        const frameTimeSec = Math.min(Math.max((currentTime - prevFrameTime) * 0.001, 0.001), 1/30);
+        // Frame delta (clamp large spikes)
+        let frameDeltaSec = (currentTime - prevFrameTime) * 0.001;
+        if (frameDeltaSec > 0.25) frameDeltaSec = 0.25; // avoid spiraling
         prevFrameTime = currentTime;
+        physicsAccumulator += frameDeltaSec;
 
         if (autoSpin && !dragging) {
             // Apply a gentle continuous yaw around the current 'up' axis of the view matrix
@@ -447,36 +498,61 @@ async function main() {
     renderParamsData[16] = viewMat[8]; renderParamsData[17] = viewMat[9]; renderParamsData[18] = viewMat[10];
     device.queue.writeBuffer(renderParamsBuffer, 0, renderParamsData);
 
-        // Scale dt by frame time for consistent simulation speed
-        const effectiveDt = params.dt * (frameTimeSec / (1/60)); // normalized to 60fps
-        device.queue.writeBuffer(simParamsBuffer, 0, new Float32Array([params.G, effectiveDt]));
-
-        const commandEncoder = device.createCommandEncoder();
-
-        // Compute pass
-    // Reset global max (atomic u32) to 0 before compute
-    device.queue.writeBuffer(maxRadiusBuffer, 0, new Uint32Array([0]));
-    const computePass = commandEncoder.beginComputePass();
-        computePass.setPipeline(computePipeline);
-        const computeBindGroup = device.createBindGroup({
-            layout: computePipeline.getBindGroupLayout(0),
-            entries: [
-                { binding: 0, resource: { buffer: particleBuffers[t % 2] } },
-                { binding: 1, resource: { buffer: particleBuffers[(t + 1) % 2] } },
-                { binding: 2, resource: { buffer: simParamsBuffer } },
-                { binding: 3, resource: { buffer: maxRadiusBuffer } },
-            ],
-        });
-        computePass.setBindGroup(0, computeBindGroup);
-        computePass.dispatchWorkgroups(numWorkgroups);
-        computePass.end();
-
-        // Schedule copy of per-workgroup maxima to staging buffer every 10 frames
-        const doRead = (frameCount % 10) === 0 && !maxReadPending;
-        if (doRead) {
-            commandEncoder.copyBufferToBuffer(maxRadiusBuffer, 0, maxRadiusReadBuffer, 0, 4);
-            maxReadPending = true;
+        // We may advance physics in fixed-size steps; run zero or more physics steps this frame
+        // Each physics step performs one compute dispatch
+        let stepsThisFrame = 0;
+        while (physicsAccumulator >= PHYSICS_STEP) {
+            physicsAccumulator -= PHYSICS_STEP;
+            stepsThisFrame++;
+            // Write (constant) sim params (fixed dt, no scaling now)
+            simParamsData[0] = params.G;
+            simParamsData[1] = params.dt; // treat params.dt as per-step integration interval
+            device.queue.writeBuffer(simParamsBuffer, 0, simParamsData);
+            const commandEncoder = device.createCommandEncoder();
+            // Compute pass (only when stepping physics)
+            device.queue.writeBuffer(maxRadiusBuffer, 0, new Uint32Array([0])); // reset max distance atomic
+            const computePass = commandEncoder.beginComputePass();
+            computePass.setPipeline(computePipeline);
+            computePass.setBindGroup(0, computeBindGroups[t % 2]);
+            computePass.dispatchWorkgroups(numWorkgroups);
+            computePass.end();
+            // Readback scheduling based on physics step count
+            const doRead = (physicsFrameCount % READBACK_INTERVAL) === 0 && !maxReadPending;
+            if (doRead) {
+                commandEncoder.copyBufferToBuffer(maxRadiusBuffer, 0, maxRadiusReadBuffer, 0, 4);
+                maxReadPending = true;
+            }
+            // Submit compute work immediately (allows overlap with potential next render CPU tasks)
+            device.queue.submit([commandEncoder.finish()]);
+            // Handle readback promise (non-blocking)
+            if (doRead) {
+                maxRadiusReadBuffer.mapAsync(GPUMapMode.READ).then(() => {
+                    const arr = new Uint32Array(maxRadiusReadBuffer.getMappedRange());
+                    const u32 = arr[0];
+                    lastMaxDist = new Float32Array(new Uint32Array([u32]).buffer)[0];
+                    if (distanceIndicator) {
+                        distanceIndicator.textContent = `R: ${lastMaxDist.toExponential(1)}`;
+                    }
+                    maxRadiusReadBuffer.unmap();
+                    maxReadPending = false;
+                }).catch(() => { maxReadPending = false; });
+            } else if (distanceIndicator) {
+                distanceIndicator.textContent = `R: ${lastMaxDist.toExponential(1)}`;
+            }
+            t++;
+            physicsFrameCount++;
+            // Update ping-pong bind groups index implicitly via t
         }
+        // If no physics step executed, we still refresh indicator occasionally
+        if (stepsThisFrame === 0 && distanceIndicator && (frameCount % 120) === 0) {
+            distanceIndicator.textContent = `R: ${lastMaxDist.toExponential(1)}`;
+        }
+
+        // Prepare to render using the latest completed physics buffer (t points to next write index)
+        const srcBufferIndex = (t) % 2; // last written destination is (t%2) after increment in loop
+        const renderSrc = particleBuffers[srcBufferIndex];
+        // Render pass (always each frame)
+        const commandEncoder = device.createCommandEncoder();
 
         // Render pass
         const textureView = context.getCurrentTexture().createView();
@@ -490,30 +566,12 @@ async function main() {
         });
         renderPass.setPipeline(renderPipeline);
         renderPass.setBindGroup(0, renderBindGroup);
-        renderPass.setVertexBuffer(0, particleBuffers[(t + 1) % 2]);
+    renderPass.setVertexBuffer(0, renderSrc);
         renderPass.setVertexBuffer(1, quadVertexBuffer);
         renderPass.draw(4, params.numParticles, 0, 0);
         renderPass.end();
 
-        device.queue.submit([commandEncoder.finish()]);
-
-        // Map and read after GPU work submission (non-blocking)
-        if (doRead) {
-                maxRadiusReadBuffer.mapAsync(GPUMapMode.READ).then(() => {
-                    const arr = new Uint32Array(maxRadiusReadBuffer.getMappedRange());
-                    const u32 = arr[0];
-                    lastMaxDist = new Float32Array(new Uint32Array([u32]).buffer)[0];
-                    if (distanceIndicator) {
-                        distanceIndicator.textContent = `R: ${lastMaxDist.toExponential(1)}`;
-                    }
-                    maxRadiusReadBuffer.unmap();
-                    maxReadPending = false;
-                }).catch(() => { maxReadPending = false; });
-        } else if (distanceIndicator && frameCount % 10 !== 0) {
-            // Keep indicator refreshed even if not reading this frame
-            distanceIndicator.textContent = `R: ${lastMaxDist.toExponential(1)}`;
-        }
-        t++;
+    device.queue.submit([commandEncoder.finish()]);
         requestAnimationFrame(frame);
     }
 
