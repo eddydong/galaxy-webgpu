@@ -2,18 +2,33 @@
 
 // Handles UI elements like FPS counter and WebGPU warning
 export function setupFPS() {
-    // FPS Counter
-    let fpsCounter = document.getElementById('fps-counter');
-    if (!fpsCounter) {
-        fpsCounter = document.createElement('div');
-        fpsCounter.id = 'fps-counter';
-        fpsCounter.className = 'fps-counter';
-        document.body.appendChild(fpsCounter);
-    } else {
-        // Ensure it is visible and styled
-        fpsCounter.className = 'fps-counter';
-        fpsCounter.style.display = '';
-    }
+  // FPS Counter container with separate lines for render & physics
+  let fpsCounter = document.getElementById('fps-counter');
+  if (!fpsCounter) {
+    fpsCounter = document.createElement('div');
+    fpsCounter.id = 'fps-counter';
+    fpsCounter.className = 'fps-counter';
+    document.body.appendChild(fpsCounter);
+  }
+  fpsCounter.className = 'fps-counter';
+  fpsCounter.style.display = '';
+  // Ensure child lines exist
+  let renderLine = document.getElementById('render-fps');
+  if (!renderLine) {
+    renderLine = document.createElement('div');
+    renderLine.id = 'render-fps';
+    renderLine.textContent = 'FPS: --';
+    fpsCounter.appendChild(renderLine);
+  }
+  let physicsLine = document.getElementById('physics-fps');
+  if (!physicsLine) {
+    physicsLine = document.createElement('div');
+    physicsLine.id = 'physics-fps';
+    physicsLine.style.fontSize = '0.9em';
+    physicsLine.style.marginTop = '4px';
+    physicsLine.textContent = 'Physics: --';
+    fpsCounter.appendChild(physicsLine);
+  }
     // WebGPU warning will be handled in main.js as before
 }
 

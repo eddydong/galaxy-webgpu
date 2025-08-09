@@ -436,7 +436,9 @@ async function main() {
         toggleAutoSpin
     });
 
-    const fpsCounter = document.getElementById('fps-counter'); // created for setupFPS
+    const fpsCounter = document.getElementById('fps-counter'); // container from setupFPS
+    const renderFpsCounter = document.getElementById('render-fps');
+    const physicsFpsCounter = document.getElementById('physics-fps');
     let lastTime = performance.now();
     let frameCount = 0;
     // Temporal decoupling: fixed physics rate (60Hz) while rendering every frame
@@ -444,6 +446,8 @@ async function main() {
     const PHYSICS_STEP = 1 / TARGET_PHYSICS_HZ; // seconds
     let physicsAccumulator = 0;
     let physicsFrameCount = 0; // counts only executed physics steps
+    let physicsStepsThisSecond = 0;
+    let lastPhysicsTime = performance.now();
 
     let t = 0;
     let prevFrameTime = performance.now();
@@ -452,7 +456,7 @@ async function main() {
         const currentTime = performance.now();
         frameCount++;
         if (currentTime - lastTime >= 1000) {
-            fpsCounter.textContent = `FPS: ${frameCount}`;
+            if (renderFpsCounter) renderFpsCounter.textContent = `FPS: ${frameCount}`;
             frameCount = 0;
             lastTime = currentTime;
         }
@@ -541,11 +545,19 @@ async function main() {
             }
             t++;
             physicsFrameCount++;
+            physicsStepsThisSecond++;
             // Update ping-pong bind groups index implicitly via t
         }
         // If no physics step executed, we still refresh indicator occasionally
         if (stepsThisFrame === 0 && distanceIndicator && (frameCount % 120) === 0) {
             distanceIndicator.textContent = `R: ${lastMaxDist.toExponential(1)}`;
+        }
+
+        // Physics FPS update once per second
+        if (currentTime - lastPhysicsTime >= 1000) {
+            if (physicsFpsCounter) physicsFpsCounter.textContent = `Physics: ${physicsStepsThisSecond}`;
+            physicsStepsThisSecond = 0;
+            lastPhysicsTime = currentTime;
         }
 
         // Prepare to render using the latest completed physics buffer (t points to next write index)
